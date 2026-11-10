@@ -51,8 +51,8 @@
 <body>
 <canvas id="stage"></canvas>
 
-<div class="overlay" id="rotate">
-  <div><h1 id="orientTitle">Too small to play</h1><p id="orientMsg">Turn the tablet, or make the window bigger.</p></div>
+<div class="overlay" id="smallBoard">
+  <div><h1 id="smallTitle">Too small to play</h1><p id="smallMsg">Turn the tablet, or make the window bigger.</p></div>
 </div>
 
 <div class="overlay" id="winner">
@@ -707,7 +707,7 @@ const RENDER = {
     this.canvas.width = Math.round(W * dpr); this.canvas.height = Math.round(H * dpr);
     this.canvas.style.width = W + 'px'; this.canvas.style.height = H + 'px';
     this.bakeStatic(); this.bakeSprites();
-    PLATFORM.rotateCheck();
+    PLATFORM.legibilityCheck();
   },
   bandPx(shortSide) {
     const b = CONFIG.RENDER.hudBand;
@@ -993,7 +993,7 @@ const PLATFORM = {
     });
     window.addEventListener('blur', () => INPUT.abort());
     document.getElementById('rematch').addEventListener('click', () => { GAME.rematch(); });
-    document.getElementById('rotate').addEventListener('click', () => PLATFORM.rotateCheck());
+    document.getElementById('smallBoard').addEventListener('click', () => PLATFORM.legibilityCheck());
     window.addEventListener('error', (e) => DEBUG.report('ERROR ' + (e.message || '') + ' @line ' + (e.lineno || '?')));
     window.addEventListener('unhandledrejection', (e) => DEBUG.report('REJECT ' + ((e.reason && e.reason.message) || e.reason)));
   },
@@ -1023,15 +1023,15 @@ const PLATFORM = {
      whichever direction draws the bigger board, so portrait is no longer a reason to refuse.
      The overlay is back only for the case that really is unplayable: a viewport too small to
      produce a legible board in EITHER direction. */
-  rotateCheck() {
+  legibilityCheck() {
     const got = 2 * P.stoneR * RENDER.scale, need = CONFIG.RENDER.minStonePx;
     this.smallPx = got;
     this.tooSmall = got < need;
-    const el = document.getElementById('rotate');
+    const el = document.getElementById('smallBoard');
     el.classList.toggle('on', this.tooSmall);
     if (this.tooSmall) {
-      document.getElementById('orientTitle').textContent = 'Too small to play';
-      document.getElementById('orientMsg').textContent =
+      document.getElementById('smallTitle').textContent = 'Too small to play';
+      document.getElementById('smallMsg').textContent =
         'Stones are ' + got.toFixed(0) + ' px wide here; the game needs at least ' + need +
         ' px. Turn the tablet, or make the window bigger.';
     }
@@ -1583,10 +1583,10 @@ function layoutChecks() {
 
   // T30: the overlay is now a legibility gate, not an orientation gate.
   view(1024, 768); lay('auto');
-  const roomy = !PLATFORM.tooSmall && !document.getElementById('rotate').classList.contains('on');
+  const roomy = !PLATFORM.tooSmall && !document.getElementById('smallBoard').classList.contains('on');
   const roomyPx = PLATFORM.smallPx;
   view(320, 300); lay('auto');
-  const tiny = PLATFORM.tooSmall && document.getElementById('rotate').classList.contains('on');
+  const tiny = PLATFORM.tooSmall && document.getElementById('smallBoard').classList.contains('on');
   const tinyPx = PLATFORM.smallPx, tinyRot = RENDER.rot;
   restore();
   T('T30 legibilityGate', roomy && tiny,
