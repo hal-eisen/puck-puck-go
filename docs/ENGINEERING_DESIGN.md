@@ -90,7 +90,7 @@ No PRD acceptance criterion is relaxed. Two get cheaper ("stones never enter a g
 | User story | "so a bump in the road doesn't waste my turn" | "so an overshoot or mis-grab doesn't waste my turn" |
 | Physics § | (implied level device) | add: "no device-orientation or in-plane gravity input; the table is top-down regardless of mount angle" |
 | Non-goals | — | add: "robustness to capacitive touch noise is in scope; pointer jitter *filtering* is not" |
-| UI §"rotate to landscape" | landscape-only; portrait dims the canvas and shows a rotate prompt | "the table follows the window: its long axis points whichever way draws the bigger board. Play is blocked only when the rendered stones fall below the legibility floor — a big portrait panel is a bigger board than a small landscape one" (§10.5, D11) |
+| UI §"rotate to landscape" | landscape-only; portrait dims the canvas and shows a rotate prompt | "the field is **always** drawn with its long axis horizontal, because the two players sit next to each other at its two ends — no window shape rotates the table. A tall window is playable when it is wide enough; play is blocked only below the legibility floor, which the panel quotes in pixels" (§10.5, D11) |
 
 ---
 
@@ -108,7 +108,7 @@ No PRD acceptance criterion is relaxed. Two get cheaper ("stones never enter a g
 | D8 | Static rendering | Offscreen canvas, redrawn only on resize | Redraw field each frame | Biggest single lever for the throttled-tablet budget |
 | D9 | Wake lock | Opportunistic + re-acquire on visibility; treat absence as acceptable | Depend on it | Support on iPadOS `file://` is unverified; §11.4 |
 | D10 | Turn indicator | Glow **plus** banner, stone ring, and score tint | PRD's glow alone | Sunlight/dimmed-panel redundancy (§2.2b) |
-| D11 | Board orientation | **Layout is a display property**: `wide` / `tall` / `auto` picks the layout that draws the bigger board; the legibility floor, not the viewport shape, gates play | "Landscape only" + `screen.orientation.lock('landscape')` | A 768×1024 portrait panel draws the *same* 573 px board as a 1024×768 landscape one — landscape was never the requirement, an aimable stone was. And no browser can sense where the two players are sitting, so the layout is chosen from measured room and overridable by hand (§10.5) |
+| D11 | Board orientation | **The long axis is horizontal in every window shape.** There is no `wide`/`tall` choice and no orientation lock: a tall window gets a width-limited horizontal board with the scoreboard in the space above it, and the legibility floor — not the viewport shape — gates play | "Landscape only" + `screen.orientation.lock('landscape')`; and, briefly, this decision's own predecessor: `wide`/`tall`/`auto` picking whichever drew the bigger board | The PRD's two players sit **next to each other, left and right**, one at each end of the table — so the long axis is the axis they sit either end of, and that is a direction, not a preference. Standing the table up on a portrait panel drew a *bigger* board (1008 px vs 752 px on the same tablet) and put both players at its **sides**: a bigger board that is the wrong board. Landscape was never the requirement either — an aimable stone was, and that is a pixel floor, quoted and tested (§10.5) |
 
 ### 3.1 D1 in detail: why not Planck.js
 
@@ -183,30 +183,29 @@ y ∈ [−0.50, +0.50]
 P1 defends x = −0.80, P2 defends x = +0.80
 ```
 
-**Fit**: the *drawable* extents include both goal pockets: x ∈ [−0.88, +0.88] → aspect **1.76 : 1**
-in `wide`, and the same box turned 90° in `tall` (§10.5).
+**Fit**: the *drawable* extents include both goal pockets: x ∈ [−0.88, +0.88] → aspect **1.76 : 1**. That box is drawn the same way in every window: the table **lies down**, long axis across the screen, because that is the axis the two players sit either end of (§10.5).
 
 ```
-layout = 'wide' | 'tall' | 'auto'                 // which way the table's LONG axis points
-mx = 8 px + max(inset-left, inset-right)          // insets PER AXIS: a notch is on one edge,
-my = 8 px + max(inset-top,  inset-bottom)         // and which edge depends on how it is turned
-band   = clamp(shortSide * 0.10, 34 px, 72 px)    // scoreboard strip, reserved not overlaid
-availW = W − 2*mx − (tall ? band : 0)             // strip across the top when wide,
-availH = H − 2*my − (wide ? band : 0)             // down the left edge when tall
-scale  = min(availW / (tall ? 1.00 : 1.76), availH / (tall ? 1.76 : 1.00))
-auto   = tall  if  scale(tall) > scale(wide) * 1.06  else  wide      // flipMargin
+mx = 8 px + max(inset-left, inset-right)          // insets PER AXIS: a notch owns one edge,
+my = 8 px + max(inset-top,  inset-bottom)         // and which edge depends on how it is mounted
+band   = clamp(shortSide * 0.10, 34 px, 72 px)    // scoreboard strip across the top: reserved, not overlaid
+availW = W − 2*mx
+availH = H − 2*my − band
+scale  = min(availW / 1.76, availH / 1.00)        // one basis: screen x ← world x, screen y ← −world y
 ```
 
-Every world→screen mapping goes through one function, `pt(x, y)`, with `toWorld`, `dir` and `rect` as
-its companions. `wide` maps screen x ← world x, screen y ← −world y; `tall` swaps the axes and flips
-one: screen x ← −world y, screen y ← −world x. That is not a cosmetic refactor: a rotated board needs
-two screen axes to describe one world point, and the old `X(x)` / `Y(y)` pair could not. The input
-layer measures the pull against `pt()` — *where the stone is drawn* — so "you grab what you see"
-holds in both layouts by construction rather than by two copies of the arithmetic (§8.1).
+Every world→screen mapping goes through one function, `pt(x, y)`, with `toWorld`, `dir` and `rect` as its
+companions. `pt` maps screen x ← cx + x·scale, screen y ← cy − y·scale; `toWorld` is its exact inverse and
+`dir` is the same map with the translation taken out. The input layer measures the pull against `pt()` —
+*where the stone is drawn* — so "you grab what you see" holds by construction rather than by two copies
+of the arithmetic (§8.1). `dir(1, 0)` is **asked, never assumed**: the aim tests and the pixel probes
+sweep and drag along whatever direction the renderer reports, so a probe cannot quietly drift out of the
+basis it thinks it is checking. (That discipline is what survived the removal of the rotated layout: it
+bought the second coordinate system, and it is still what stops the third one from being invisible.)
 
-Fitting the pockets rather than clipping them means the goal is fully drawn, and the letterbox never hides gameplay. The score is **not** drawn on top of the felt: it owns a reserved strip — across the top in `wide`, down the left edge in `tall` — and the field is laid out in what is left, so the play area is the viewport minus the scoreboard on every panel in either layout. A strip is *reserved* rather than the letterbox being *relied on* because most landscape tablets are 16:9 or wider, where there is no spare vertical band to hide a score in — the first build put the digits on the felt for exactly that reason, and playtest called it. `T26` now pins both halves: the HUD box must end above the field's top edge, and `fieldH ≤ viewport − 2·margin − band`.
+Fitting the pockets rather than clipping them means the goal is fully drawn, and the letterbox never hides gameplay. The score is **not** drawn on top of the felt: it owns a reserved strip **across the top** — the long side of the table, the one side nobody is sitting at — and the field is laid out in what is left, so the play area is the viewport minus the scoreboard on every panel. A strip is *reserved* rather than the letterbox being *relied on* because most landscape tablets are 16:9 or wider, where there is no spare vertical band to hide a score in — the first build put the digits on the felt for exactly that reason, and playtest called it. `T26` now pins both halves: the HUD box must end above the field's top edge, and `fieldH ≤ viewport − 2·margin − band`. The strip's *thickness* is keyed to the short side, which self-balances without a rule about it: in a tall window the short side is the width, so the strip is generous exactly where it costs the board nothing (a tall window is width-limited anyway), and in a flat window the short side is the height, so the strip shrinks itself exactly where it would cost board.
 
-Measured, at `1024×768` and at `768×1024` with `layout: auto`: `scale` is **572.7 px/H** in *both* — 51.5 px stones either way (`T27`). Turning the tablet costs nothing; it changes the seat, not the board. That equality is the point of D11, and it is a measured property, not an expectation.
+Measured (`T27`, four window shapes, all four passing `layoutProbe` with the long axis across and P1's goal at the left end): `1024×768` → board **1008 px** wide, 51.5 px stones; `768×1024` → **752 px**, 38.5 px; `600×1200` → 584 px, 29.9 px; `1280×560` → 859 px, 43.9 px. That is the honest content of D11: a tall window needs no rotation and stays legible, and it is **not** identical to landscape — the same tablet held upright gives a narrower board, because width is now the binding constraint. Rotating the board would buy that width back, and is refused because it would move the players.
 
 Derived physical sizes (consequence for §8's touch targets, computed for two representative tablets):
 
@@ -510,45 +509,53 @@ All four, simultaneously, so losing any one to sunlight is survivable:
 
 ### 10.5 Layout, legibility, safe areas (D11)
 
-The PRD says landscape. Three different claims are tangled in that sentence, and the build separates them:
+The PRD says landscape. Three claims are tangled in that sentence, and one of them used to be decided
+by a rule the build invented:
 
 | Claim | What it really needs | Mechanism |
 | --- | --- | --- |
-| Two players sit side by side | unknowable to the browser — no sensor says where people are sitting | `layout` is chosen from measured room, and is **overridable by hand** |
-| The table's long axis is horizontal | a *preference*: it is whichever way draws the bigger board on a wide window | `wide` / `tall`, picked by `scale` (not by the word "landscape") |
-| Play must be legible | a stone you can aim at and grab | `minStonePx`: a measured legibility floor, in CSS px, **in either layout** |
+| Two players sit **next to each other**, one at each end of the table | a direction, not a sensor reading: the long axis *is* the axis they sit either end of | the field is drawn horizontally in **every** window shape — there is no layout choice left to make |
+| The window may be tall | a shape, not an error | the board is width-limited there, so a scoreboard strip across the top costs that window nothing |
+| Play must be legible | a stone you can aim at and grab | `minStonePx`: a measured legibility floor, in CSS px, quoted back to the player and then tested |
 
 ```
-wide : long axis horizontal, players left/right, scoreboard strip across the TOP
-tall : long axis vertical,   players bottom/top, scoreboard strip down the LEFT edge,
-       each score sitting nearest the end that player defends
-auto : whichever of the two draws the bigger board, with 6% hysteresis (flipMargin)
-       so dragging a window edge cannot flap the layout between two near-ties
+every window : long axis horizontal, players left and right, scoreboard strip across the TOP,
+               each score nearest the end of the table that player defends
+scale        : min((W − 2·mx)/1.76, (H − 2·my − band)/1.00)
 ```
 
-Measured at 1024×768 and at 768×1024: identical `scale` (572.7 px/H), identical 51.5 px stones. A large
-portrait panel is not a compromised landscape panel — it is the same board from a different seat.
+Measured at 1024×768 and at 768×1024: **1008 px** and **752 px** boards, 51.5 px and 38.5 px stones. A
+large portrait panel is playable and asks nothing of the person holding it. It is not *identical* to
+landscape, and this doc no longer claims it is: the previous revision of D11 rotated the table on a
+portrait panel precisely to make those two numbers equal — 573 px in both — and no measurement objected,
+because the measurement was of the board and not of the game. The board was bigger and the two players
+were sitting at its **sides** instead of its ends. "Which way draws the bigger board" was a tie-breaker
+looking for a seat it could not see; the seat was in the PRD the whole time.
 
-**The gate is legibility, not orientation.** The overlay no longer appears because the window is tall;
-it appears when `2·stoneR·scale < minStonePx` (18 px), and it says so: *"Stones are 15 px wide here; the
-game needs at least 18 px. Turn the tablet, or make the window bigger."* A 768×1024 window plays; a
-320×300 window does not, in either orientation — and at 320×300 the game still *chooses* a layout
-(`T30` reports which) before declining, because "too small" and "wrong shape" used to be the same
-message and were two different facts.
+**The gate is legibility, not orientation.** The overlay appears when `2·stoneR·scale < minStonePx`
+(18 px), and it quotes the rectangle it needs instead of asking for a rotation it is no longer allowed to
+request: *"Stones are 15 px wide here; the game needs at least 18 px. The table never turns, so it needs
+a window at least 369 x 251 px — make the window wider, or bigger."* A 768×1024 window plays; a 320×300
+window does not. `T30` then loads **the advertised rectangle** and holds the panel to it: at 369×251 the
+field measures 353×201 px, the stones measure 18.05 px, and nothing is blocked. A number printed on the
+screen is a claim; a claim that is never loaded is a decoration. The promise carries one px of slack
+because `18/0.09` and `352/1.76` both land a hair off a whole number in binary floating point, and a
+promise that is a hair wrong is a promise that contradicts the overlay it is printed on.
 
-**`auto` does not lock the screen.** The layout follows the window, so rotating the tablet is a layout
-change and not an error; nothing yells at the player mid-rotation. An explicit `?layout=wide|tall` *does*
-ask the device to turn (`lockLayout()`, where the platform permits it — fullscreen Chrome/Android, not
-iPadOS, §11.4). That override is also the honest answer to the seat the machine cannot sense: a portrait
-display mounted in the middle of a car has both players **beside** it, and for that seat the right board
-is the smaller `wide` one. `?layout=wide|tall` and the `flip layout` debug button are one constant wide;
-the alternative is guessing at something measurable only by the people sitting there.
+**No orientation lock, and no `?layout=` to ask for one.** Turning the tablet changes the letterboxing
+and nothing else, so `lockLayout()` is gone together with the URL override that called it (and iPadOS
+refuses that API anyway, §11.4). The seat argument that justified the override — a portrait display
+mounted in the middle of a car, both players beside it — turns out to be the seat the field is *designed*
+for, not an exception to it, which is why the override, the debug button, the hysteresis constant and the
+layout axis-swap all left together.
 
-Insets are applied **per axis** (`mx` from left/right, `my` from top/bottom): a notch is on one edge, and
-which edge it is depends on which way the panel is turned. Taking `max()` over all four insets — the
-one-line version — would shrink the board on every device to pay for an inset that device does not have,
-handing back the legibility that `tall` exists to buy. `T32` sets `--inset-t: 44px` in both layouts and
-asserts `mx` is untouched, `my` grew, and neither the strip nor the felt is drawn inside the notch band.
+Insets are applied **per axis** (`mx` from left/right, `my` from top/bottom): a notch owns one edge, and
+which edge that is depends on how the panel is mounted — and panels get mounted upright as well as flat.
+Taking `max()` over all four insets — the one-line version — would shrink the board on every device to
+pay for an inset that device does not have. `T32` sets `--inset-t: 44px` and `--inset-l: 44px` in a
+portrait and a landscape window and asserts the cost lands on the right axis: a top inset leaves the
+field width *exactly* where it was (752 px, because that window is width-limited), a left inset takes it
+to 664 px, and neither the strip nor the felt is drawn inside the band the notch owns.
 
 ---
 
@@ -610,12 +617,14 @@ On `visibilitychange → hidden`: cancel aim, release capture, suspend audio, se
 
 ```
 first pointerdown → { audio unlock; requestFullscreen(navigationUI:'hide');
-                       wakeLock.request('screen'); lockLayout() }
+                       wakeLock.request('screen') }
 visibilitychange → visible → re-acquire wake lock
 
-`lockLayout()` maps an **explicit** `?layout=wide|tall` onto `screen.orientation.lock('landscape'|'portrait')`.
-Under the default `auto` it locks nothing: the layout already follows the window, and a lock would be the
-game asserting something about where the players are sitting that it has not measured.
+Nothing calls `screen.orientation.lock()` at all, in either direction. The field is drawn horizontally
+whatever the panel is doing, so a lock would be the game fighting the operating system to change nothing:
+turning the tablet alters the letterboxing, never which end of the table each player is sitting at.
+iPadOS refuses the API regardless, which is a polite way of saying the platform was never going to make
+this decision for us.
 ```
 
 Honest risk statement (D9): **we do not know that Wake Lock works on our shipping configuration** — a single `file://` HTML on iPadOS Safari and Chrome-for-Android. Unknowns to be closed by experiment in M4, not by reading specs:
@@ -654,22 +663,21 @@ const CONFIG = {
   },
   GAME: { winScore: 5, bannerMs: 1000, celebrationMs: 2000, seeded: true },
   RENDER: { marginPx: 8, particleCap: 60, dprMax: 3,
-            hudBand: { frac: 0.10, min: 34, max: 72 },             // score strip: top edge (wide)
-            layout: 'auto',                                       //   or left edge (tall)
-            minStonePx: 18, flipMargin: 1.06 },                    // §10.5: layout, not orientation
+            hudBand: { frac: 0.10, min: 34, max: 72 },             // score strip: the band across the top
+            minStonePx: 18 },                                     // §10.5: legibility floor, not orientation
   AUDIO:  { pairThrottleMs: 50, maxVoices: 8 },
 };
 ```
 
 The PRD's table maps 1:1 onto `PHYSICS` — **with one deliberate deviation**: `maxLaunchSpeed` is 2.15 H/s, not 3.0. At 3.0 a max-power stone rolls 2.73 H = **171% of the table**, so every full pull ended in the far wall, and a full pull that cannot be stopped where you aimed it reads as uncontrollable. At 2.15 the same shot measures 1.602 H = **one table length** (§13.1). Nothing else moved: the drag model, masses and restitutions are the PRD's, and `T25` now gates the calibration (roll distance within ±7% of one table length), so no future tune can quietly undo it. The knob stays live under `?debug` for the car session. `dprMax: 3` caps fill cost on very-high-DPR panels (a 2.7K tablet at dpr 3 would quadruple pixel work for no visible gain in a sunlit car).
 
-The three `RENDER` layout knobs are decisions, not tuning: `layout: 'auto'` means "measure the room,
-don't assume the seat" (§10.5); `minStonePx: 18` is the smallest rendered stone diameter worth playing
-on — comfortably below the 51 px a 10.9″ tablet gives and above the point where a finger covers the
-stone it is aiming at; `flipMargin: 1.06` is hysteresis, not a size choice, and exists because a window
-being dragged through a near-tie should not flicker the whole board through 90°. `?layout=wide|tall|auto`
-overrides from the URL, read **before** the first `fit()` — `T31` exists because it used to be read after
-it, which made the override land one resize late and look like it worked.
+The two `RENDER` layout knobs are decisions, not tuning: `minStonePx: 18` is the smallest rendered stone
+diameter worth playing on — comfortably below the 51 px a 10.9″ tablet gives and above the point where a
+finger covers the stone it is aiming at — and it is the only *gate* in the layout; `hudBand: {frac: 0.10,
+min: 34, max: 72}` sizes the strip off the short side, which is what makes it free in a tall window and
+thin in a flat one (§5, §10.5). There is deliberately **no** `layout` knob: the previous one (`layout:
+'auto'` plus `flipMargin: 1.06` plus a `?layout=` override read before the first `fit()`) existed only to
+decide which way the table pointed, and the answer turned out not to be a matter of taste.
 
 Tuning policy: **tune `rollingDecel` first** — it dominates settle time and the "felt" character (§13.1 sensitivity); touch `linearDamping` only for top-end bleed; touch `restitution.wall` last, since it governs bank-shot liveliness and is where "ricochets feel right" actually lives. Never tune `restThreshold` to paper over a jitter bug — that hides solver defects, and §7.5's `restitutionSpeedMin` is the correct lever.
 
@@ -783,9 +791,9 @@ The frame-rate criterion is **not** measured by a headless run: a virtual-time b
 | Tool | What it does |
 | --- | --- |
 | `tools/physics-test.mjs` | Extracts the DOM-free sections (`CONFIG`…`SIM`, `PRNG`, `runSelfTests`) straight out of `index.html` and runs them in Node. Catches physics regressions in <1 s, no browser. Extraction by section markers means the tested code is *the shipped bytes*, not a copy. |
-| `tools/browser-test.sh [n] [url]` + `tools/parse-dom.py` | Headless Chrome loads `index.html?debug&selftest&n=N` under a virtual-time budget, dumps the DOM, prints the PASS/FAIL table and any page error, exits non-zero on failure. Exercises render + rules + input too. Takes a URL instead of the local file — the same suite then runs against **what is actually deployed** (cache-busting flags on, since Pages sits behind a ~10 min CDN cache) — and a URL that already carries a query (`?layout=tall`) to force an override. |
+| `tools/browser-test.sh [n] [url]` + `tools/parse-dom.py` | Headless Chrome loads `index.html?debug&selftest&n=N` under a virtual-time budget, dumps the DOM, prints the PASS/FAIL table and any page error, exits non-zero on failure. Exercises render + rules + input too. Takes a URL instead of the local file — the same suite then runs against **what is actually deployed** (cache-busting flags on, since Pages sits behind a ~10 min CDN cache) — and a URL that already carries a query, which it must join with `&`. `WIN="w,h"` sets the headless window shape, so the whole suite runs in a portrait or a flat window rather than only the default one. |
 | `tools/offline-check.mjs` | Static audit of the PRD's single-file/offline contract: no `src=`, `<link>`, absolute URL, `fetch`/`XHR`/`WebSocket`, ES `import`, `require`, media/asset reference. |
-| `tools/check.sh` | Runs the whole ladder, one command, non-zero on any failure. The browser suite runs **three times**: the layout the window picks, then `layout=tall` forced, then `layout=wide` forced. A layout is a second coordinate system, and a suite that only ever sees one of them cannot tell a rendering bug from a probe written in the wrong screen axis. |
+| `tools/check.sh` | Runs the whole ladder, one command, non-zero on any failure. The browser suite runs **three times, in three window shapes**: the default, a deliberately tall one (`WIN=820,1180`) and a deliberately flat one (`WIN=1280,600`). The field has to come out horizontal in all three — two players sit next to each other, one at each end of the table — and a suite that only ever sees one shape cannot tell that claim from a probe written for the shape it happened to run in. |
 | `tools/render-map.sh [cols] [w] [h] [extra-params]` + `tools/parse-ascii.py` | Dumps the canvas as a character grid (`DEBUG.asciiMap`: `,` felt, `+` scoreboard pill, `B`/`O` stones, `#` puck, `.` letterbox). Layout faults are legible in a terminal and diffable in a diff, with no screenshot to eyeball. |
 | `tools/probe.mjs` | Measures the §13 numbers (stopping distance, time to rest, far-wall impact speed) by integrating the shipped solver, so the analysis quotes measurements instead of algebra. |
 
@@ -809,20 +817,20 @@ same in-page harness so they run on a tablet as well as in CI:
 | **T16** | A pull that never leaves the dead zone cannot fire, and does not consume the turn | The phantom-touch guarantee (§6) |
 | **T17** | Pull opposite the shot direction (derived from `dir(1,0)`, so it is correct in either layout); power strictly rises with pull length; the stone actually launches | Slingshot semantics + power ramp |
 | **T18** | Opponent's stones ignore touch; a second/ghost finger cannot perturb an in-progress aim | Multitouch invariant (§6) |
-| **T19** | The *drawn* disc is concentric with the *physics* body (walk outward from the centre on both screen axes, stop at the first non-body pixel, keep the narrower axis; width ≈ 2r, mid ≈ 0, ±2 px) | Grab-what-you-see is the whole game; a screenshot review would not show an offset. The two-axis walk is needed because in `tall` a horizontal screen sweep runs along the world-space centre line, which a naive scan reads as a very wide puck |
+| **T19** | The *drawn* disc is concentric with the *physics* body (walk outward from the centre on both screen axes, stop at the first non-body pixel, keep the narrower axis; width ≈ 2r, mid ≈ 0, ±2 px) | Grab-what-you-see is the whole game; a screenshot review would not show an offset. The two-axis walk is still needed because the puck sits **on** the world-space centre line: a horizontal screen sweep runs along that line, which a naive scan reads as a very wide puck |
 | **T20** | The aim arrow is painted while a pull is held, in the power-hue range, on the shot side | The arrow is the only aiming feedback |
 | **T21** | A scripted match through the real state machine reaches `MatchOver`; both sides score; no non-finite bodies; no invariant violations | Multi-shot soak: state machine, reset, drift, leaks |
 | **T22** | Physics cost per rendered frame `< 4 ms` of the 16.7 ms budget, measured with the wall clock | 60 fps criterion (numeric proxy; the real number must come from the tablet) |
 | **T23** | Audio context + compressor bus wired; per-pair throttle holds; `voices ≤ maxVoices`; no throw while scheduling | The clack is priority #1 feedback and had never been exercised headlessly |
 | **T24** | First player varies from match to match; every new match starts 0–0 in `Kickoff` | PRD "random first player" — a fixed seed had quietly made it constant |
 | **T25** | A max-power shot on a wall-free board rolls within ±7% of **one** table length | Power calibration: playtest said a full pull threw the stone ~150% of the table. Pins the retune |
-| **T26** | Scoreboard box entirely inside its reserved strip, ending on the far side of the field's edge; strip pixel is bare background while the pill pixel is painted; `fieldExtentAlongStrip ≤ viewport − 2·margin − band` | "The score must not overlap the field" — geometry *and* a pixel probe, so it cannot regress into an eyeball judgement. Shares `layoutProbe()` with T27, so **neither** layout can quietly reintroduce the overlap playtest caught |
-| **T27** | A `768×1024` window lays the table along its long axis and a `1024×768` window across it, both pass `layoutProbe`, and the two boards come out the **same size** within 1% (measured: `scale` 572.7 px/H and 51.5 px stones in both) | The D11 claim, as a number: rotating the panel changes the seat, not the board |
-| **T28** | `pt()`/`toWorld()` are exact inverses (err ≈ 1e-16), `dir()` preserves unit length, and the same scripted shot produces a **bit-identical** physics trace in `wide` and in `tall` | Layout must be display-only. If a coordinate system can change a trajectory, the game has two physics engines |
-| **T29** | In `tall`, pulling DOWN-screen launches the stone world +x, which `dir()` reports as UP-screen — and it really launches with +x velocity | A sign error in the rotated basis makes the game unplayable, and no screenshot shows why: it looks like the finger is doing the wrong thing |
-| **T30** | `1024×768` is not blocked (51.5 px stones); `320×300` **is** blocked (15.5 px) even though a layout was chosen; the overlay is on exactly when `scale` puts stones below `minStonePx` | The gate is legibility, measured, in both orientations — the old code blocked on "portrait" and so blocked a playable panel and allowed an unplayable one |
-| **T31** | `?layout=` is in effect at the **first** `fit()`, recorded by `BOOT.firstFit` and compared against the resulting `rot` | An override that lands one resize late looks like it works. It also failed to fail: the check first compared against an unrecorded value and passed vacuously |
-| **T32** | `--inset-t: 44px` grows `my` and leaves `mx` exactly `marginPx`, in both layouts; neither the scoreboard strip nor the felt is drawn inside the notch band; `--inset-l` is the mirror image | Insets are per axis, because a notch is on one edge and which edge that is depends on which way the panel is turned |
+| **T26** | Scoreboard box entirely inside its reserved strip, ending on the far side of the field's edge; strip pixel is bare background while the pill pixel is painted; `fieldH ≤ viewport − 2·margin − band`; and the felt rectangle is wider than it is tall | "The score must not overlap the field" — geometry *and* a pixel probe, so it cannot regress into an eyeball judgement. Shares `layoutProbe()` with T27, so no window shape can quietly reintroduce the overlap playtest caught |
+| **T27** | Four window shapes (`768×1024`, `1024×768`, `600×1200`, `1280×560`): the felt rectangle is wider than it is tall, `dir(1,0)` is screen-right, P1's goal is at the left end, a width-limited shape really used the width, `layoutProbe` passes and stones clear `minStonePx`. It also prints the honest comparison the old version used to hide: the same tablet gives 752 px of board upright and 1008 px flat | **The requirement itself**, tested as a requirement instead of as a mode switch. Measured off painted geometry, because a flag can lie and a rectangle cannot. And the shapes deliberately include the tall ones, where standing the table up would draw a bigger board and still be wrong |
+| **T28** | `pt()`/`toWorld()` are exact inverses (err ≈ 1e-16) in all four shapes, `dir()` preserves unit length, and the same scripted shot produces a **bit-identical** physics trace in every one | Window shape must be display-only. If a coordinate system can change a trajectory, the game has two physics engines |
+| **T29** | In the narrowest tall window (`600×1200`), pulling toward the LEFT end of the table launches the stone world +x, which `dir()` also reports as screen +x — and it really launches, with +x velocity at launch (state, grab, power and drag length all reported) | The aim path is where a layout used to break the game, so it runs in the shape that used to be dangerous. A sign error makes the game unplayable and no screenshot shows why: it looks like the finger is doing the wrong thing. `launched` is asserted, so a test that forgot to release the pointer cannot pass |
+| **T30** | `1024×768` is not blocked (51.5 px stones); `320×300` **is** blocked (15.5 px); then the panel's own promise — "at least 369 × 251 px" — is loaded as a window and must come out unblocked at 18.05 px | The gate is legibility, measured, with no orientation escape hatch. The message quotes a number, so the number is a claim, so the claim gets loaded and measured rather than nodded at |
+| **T31** | The **first** `fit()` is already final: `BOOT.firstFit` records the very first frame's window, field box, band and scale, and T31 requires the long axis across, the aspect within 1% of 1.76:1, a non-zero band, and a re-fit at the same window to be a fixed point (drift 0) | A band, inset or config value that lands one resize late looks fine in a screenshot of a settled page. This is where the old `?layout=` landed late and still looked like it worked — and where a check that compared against an unrecorded value passed vacuously |
+| **T32** | `--inset-t: 44px` grows `my` and leaves `mx` exactly `marginPx`, in portrait and landscape windows; neither the strip nor the felt is drawn inside the notch band; `--inset-l` is the mirror image; and in a width-limited portrait window a top inset takes **no** board width (752 → 752 px) while a left inset takes 88 px of it | Insets are per axis, because a notch owns one edge and which edge that is depends on the mount. "Cost lands on the right axis" is the half that a `max()` over all four insets would quietly fail |
 
 ### 14.2 Traceability
 
@@ -853,7 +861,7 @@ same in-page harness so they run on a tablet as well as in CI:
 
 ### 14.3 Debug overlay (`?debug`)
 
-Per PRD: FPS, per-body speeds, live sliders for `rollingDecel`, `linearDamping`, `restitution.*`, `maxLaunchSpeed`. Added because this design needs them: sub-step count, live swept-test hit count (is the CCD bound holding?), per-step contact count, violation log with body id/position/velocity, "force settle" and "reset layout" buttons, SDF-distance readout for the puck, and a nudge log. Sliders write into `CONFIG.PHYSICS` live, so tuning happens on-device in the car — the only environment the feel criteria can be judged in. `?debug&ascii` (and an *ascii map* button) prints the current frame as a character grid inside the panel — at an arbitrary `--window-size`, including a portrait one, and with `?layout=wide|tall` to see both layouts side by side in the same terminal: felt, letterbox, scoreboard strip, bodies, in text. It exists because layout faults — a scoreboard on the felt, a body drawn a radius off its physics position — are obvious in 76 characters wide and invisible in a 1,280-pixel screenshot nobody looks at closely.
+Per PRD: FPS, per-body speeds, live sliders for `rollingDecel`, `linearDamping`, `restitution.*`, `maxLaunchSpeed`. Added because this design needs them: sub-step count, live swept-test hit count (is the CCD bound holding?), per-step contact count, violation log with body id/position/velocity, a "force settle" button, SDF-distance readout for the puck, and a nudge log. Sliders write into `CONFIG.PHYSICS` live, so tuning happens on-device in the car — the only environment the feel criteria can be judged in. `?debug&ascii` (and an *ascii map* button) prints the current frame as a character grid inside the panel — at an arbitrary `--window-size`, including a portrait one, which is how the tall-window layout is eyeballed at all: `./tools/render-map.sh 60 760 1040` shows the scoreboard pill across the top and the table lying across the middle of the screen, with the letterbox above and below it. There is no *flip layout* button any more: the button used to rotate the board, and the thing it was useful for — "two people are sitting somewhere no browser can detect" — is now a case the layout does not have. It exists because layout faults — a scoreboard on the felt, a body drawn a radius off its physics position — are obvious in 76 characters wide and invisible in a 1,280-pixel screenshot nobody looks at closely.
 
 ### 14.3b Defects the harness found (evidence it is pulling its weight)
 
@@ -869,6 +877,7 @@ Per PRD: FPS, per-body speeds, live sliders for `rollingDecel`, `linearDamping`,
 | Full power overshot the table | a max pull sent a stone ~1.7 table lengths; shots always died on the far wall | `maxLaunchSpeed 3.0` was a constant that was never tied to a measurable criterion. Measured roll at 3.0 = 2.73 H; at 2.15 = 1.602 H | **playtest**, then T25 |
 | `?layout=` did nothing on load | a portrait panel asked for `layout=wide` and drew `tall`; only a resize (or the debug button) applied it | The parameter was read in `DEBUG.init()`, which runs **after** `RENDER.init()` and its first `fit()`. Load order is invisible unless the effect is recorded at the moment it happens — so `BOOT.firstFit` is now recorded and asserted | **T31**, after T31 passed vacuously |
 | The "forced tall" run was green while testing the default layout | `?layout=tall` appeared in the tool's own echo, and T31 still reported `param=auto` | `case "$URL" in *\?*)` does **not** match a literal `?` in bash, so the tool appended `?debug` instead of `&debug` and the query became `layout=tall?debug` — parsed, rejected, ignored. The suite ran green because it was testing a page that had never been asked to do the thing under test | printing the resolved URL and asserting it (T31) |
+| The tall layout stood the table up on its end | a 768×1024 portrait panel drew a 573 px board with both players sitting at its **sides**, not its ends; the suite was green and the ASCII maps looked fine | D11's first revision asked "which way draws the bigger board?" when the question was "which way are the players sitting?" — and the answer was written in the PRD. Every measurement in the doc was about the board, none was about the game. Fixed by deleting the choice: one horizontal layout, the scoreboard strip across the top, the legibility floor as the only gate, and `T27` turned from a layout-mode test into a test of the requirement | **the user, looking at the screen** — no test found this, which is the point of the row |
 | Three pixel probes were written in the wrong screen axis | `layout=tall` forced: T19 measured a 33 px-wide puck (expected 19), T17/T20 aimed the wrong way | The *probes* assumed screen x = world x. In `tall`, a horizontal screen sweep runs along the world-space centre line, and "pull left" is a landscape sentence. Fixed the probes (sweep both axes and keep the narrower; derive the drag from `dir(1,0)`) instead of relaxing the assertions — and `check.sh` now runs the suite in **both** layouts, because the suite had never once been run in the other one | the forced-layout passes |
 
 Note that the last three rows are all *the harness being wrong*. A layout change is exactly when that
@@ -941,9 +950,10 @@ Each has a default already coded in this design, so implementation is not blocke
 Total ≈ 3.5–4 days, with the physics risk retired first (M1) rather than last.
 
 **Status as built.** M1–M3 are complete and green, through two playtest iterations and one layout
-iteration: `./tools/check.sh 1000` passes the whole ladder — T1…T8 at 1,000 shots, T9…T32 in **three
-browser passes** (window-chosen layout, `tall` forced, `wide` forced), and the offline audit (98.4 kB,
-1,877 lines, one inline script block, zero network/asset references, 33 checks). The artifact is also
+iteration, one of which spent itself undoing the other: `./tools/check.sh 1000` passes the whole ladder —
+T1…T8 at 1,000 shots, T9…T32 in **three browser passes in three window shapes** (default, `WIN=820,1180`
+portrait, `WIN=1280,600` flat), and the offline audit (one file, one inline script block, zero
+network/asset references, 33 checks per pass). The artifact is also
 *deployed* and verified as deployed: GitHub Pages serves the repository root with `.nojekyll` on, the
 served bytes are md5-identical to the file that was tested, and the same suite runs green against the
 live URL — "published" is a checkable claim rather than a claim.
@@ -952,13 +962,17 @@ Measured on desktop at the retuned power: worst max-power settle 1.62 s (limit 4
 1.51 s, medium-shot mean 0.88 s (limit 3 s), striker residual 3.3% (limit 10%), pileup settle ≤ 1.52 s,
 max shot rolls 1.602 H = one table (target 100%), determinism exact, zero invariant violations and zero
 stone-in-goal across 1,000 + 1,000 mouth-targeted shots, physics ≈ 0.004 ms/frame of the 16.7 ms budget.
-Layout is measured too: 572.7 px/H and 51.5 px stones at both 1024×768 and 768×1024, and a physics trace
-identical between layouts to the last bit (`T28`).
+Layout is measured too, in four window shapes: 1008 px / 752 px / 584 px / 859 px of board at
+1024×768, 768×1024, 600×1200 and 1280×560 — every one of them with the long axis across, P1's goal at the
+left end, and stones at or above the 18 px floor (38.5 px on a portrait tablet). The same scripted shot
+produces a physics trace identical across all four to the last bit (`T28`), and the first frame of load
+is already the final layout (`T31`). The panel's own legibility promise (369×251 px minimum) is loaded as
+a window and checked (`T30`).
 
-M4/M5 remain: the platform criteria are device-only (fullscreen, orientation *lock* under an explicit
-`?layout=`, wake lock on the actual tablet, the safe-area insets that `T32` only simulates, glare
-legibility, thermal behaviour while charging, and the T22 number measured on the tablet rather than
-under a virtual-time budget).
+M4/M5 remain: the platform criteria are device-only (fullscreen, how a console-mounted portrait panel
+actually behaves now that nothing asks it to turn, wake lock on the real tablet, the safe-area insets
+that `T32` only simulates, glare legibility, thermal behaviour while charging, and the T22 number
+measured on the tablet rather than under a virtual-time budget).
 M5's tuning pass is also where the feel questions in §16 get answered; the `?debug` live sliders
 (rollingDecel, linearDamping, wall e, body e, maxSpeed, puckMass) exist for exactly that. `maxLaunchSpeed` now has a target to tune against rather than a vibe: `T25` prints the measured roll as a percentage of table length.
 

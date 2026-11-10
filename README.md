@@ -12,23 +12,38 @@ restarts the match.
 
 ## Which way the table points
 
-The table does not require landscape. It requires stones big enough to aim at, which is a different
-requirement and the one that actually matters:
+Always the same way. The field's long axis runs **across the screen** in every window, and the two
+players sit **next to each other**, one at each end of the table:
 
-* **`wide`** — long axis across the screen, players left and right, scoreboard strip across the top.
-* **`tall`** — long axis up the screen, players bottom and top, scoreboard strip down the left edge,
-  each score nearest the end that player defends.
-* **`auto`** (default) — whichever of the two draws the bigger board, so a tall panel that has the room
-  gets the tall layout and the same board it would have had in landscape.
+```
+        ┌───────────── 5 – 3 ─────────────┐   ← scoreboard strip, across the top
+        │                                 │
+   B B  │   ●        ● puck        ●      │  O O     ← each player defends their own end
+        │                                 │
+        └─────────────────────────────────┘
+```
 
-Measured: `1024×768` and `768×1024` both give a 573 px board with 51 px stones. Turning the tablet
-changes where you sit, not how big the game is. Nothing is locked to any orientation, because no sensor
-knows where the two players are sitting — and a portrait display mounted in the middle of a car has both
-players *beside* it, which is the seat `auto` cannot see.
+A tall window is fine and asks nothing of whoever is holding it — no rotating, no locking, nothing to
+turn. The board is simply as wide as the window is, and the leftover height is where the scoreboard
+goes, so in a tall window the strip costs the game nothing.
 
-So it is overridable: **`?layout=wide`**, **`?layout=tall`**, **`?layout=auto`**. If the board really is
-too small — in either orientation — the game says so and quotes the measurement (*"Stones are 15 px wide
-here; the game needs at least 18 px"*) instead of asking for a rotation that would not have helped.
+What a tall window does cost is width, and that is said plainly rather than papered over: the same
+tablet gives a **1008 px** board lying flat and a **752 px** board standing upright, with 51 px and
+38 px stones. Rotating the board would buy the width back — and is refused, because it would leave both
+players sitting at the *sides* of the table instead of its ends. An earlier build did exactly that, and
+every measurement in the project approved it, because every measurement was about the board and none
+was about the game.
+
+So the only gate is legibility, measured as rendered stone width, not as window shape:
+
+```
+scale = min((W − 2·8) / 1.76, (H − 2·8 − band) / 1.00)      # one layout, one basis
+```
+
+If a stone comes out under 18 px the game says so and quotes the requirement — *"Stones are 15 px wide
+here; the game needs at least 18 px. The table never turns, so it needs a window at least 369 x 251 px —
+make the window wider, or bigger."* `T30` then loads that exact rectangle and checks the promise, because
+a number printed on screen is a claim.
 
 ## Design
 
@@ -44,11 +59,11 @@ Requires only Node and a Chrome/Chromium binary.
 ./tools/check.sh 300        # quick pass
 ```
 
-`check.sh` runs the browser suite three times: once with the layout the window picks, then with
-`layout=tall` forced, then `layout=wide`. A layout is a second coordinate system, and a suite that only
-ever sees one of them cannot tell a rendering bug from a test that was written in the wrong screen axis.
-That is not hypothetical — three pixel probes were wrong in exactly that way, and the suite had never
-once been run in the other layout.
+`check.sh` runs the browser suite three times, in three window shapes: whatever window it gets, a
+deliberately tall one (`WIN=820,1180`) and a deliberately flat one (`WIN=1280,600`). The field has to
+come out horizontal in all three, and a suite that only ever sees one shape cannot tell that claim from a
+test that was written for the shape it happened to run in. That is not hypothetical — three pixel probes
+were wrong in exactly that way once already.
 
 | Command | Checks |
 | --- | --- |
@@ -56,8 +71,8 @@ once been run in the other layout.
 | `node tools/physics-test.mjs [n]` | Physics only, in Node, extracted from the shipped `index.html` |
 | `./tools/browser-test.sh [n]` | Headless Chrome: physics + pixels + rules + input + match flow + layout |
 | `./tools/browser-test.sh [n] <url>` | Same suite against a deployed copy instead of the local file |
-| `./tools/browser-test.sh [n] "<url>?layout=tall"` | Same suite with one layout forced |
-| `./tools/render-map.sh [cols] [w] [h] [extra params]` | The canvas as a character map: `,` felt, `+` scoreboard, `B`/`O` stones, `#` puck. Try `./tools/render-map.sh 60 768 1024` (portrait) and add `"layout=wide"` to compare |
+| `WIN=820,1180 ./tools/browser-test.sh [n]` | Same suite in a window of that shape — try it portrait |
+| `./tools/render-map.sh [cols] [w] [h]` | The canvas as a character map: `,` felt, `+` scoreboard, `B`/`O` stones, `#` puck. Try `./tools/render-map.sh 60 760 1040` (a tall window) and `./tools/render-map.sh 60 1280 560` (a flat one): the table lies across both |
 | `node tools/probe.mjs` | The quoted numbers: how far a shot rolls, when it rests, how hot it hits the far wall |
 
 The same self-tests are compiled into the game. On a real tablet open
@@ -65,9 +80,8 @@ The same self-tests are compiled into the game. On a real tablet open
 glare numbers that matter, since a headless run cannot measure either.
 
 `index.html?debug` also exposes live physics sliders (rollingDecel, linearDamping, wall e, body e,
-maxSpeed, puckMass) for tuning feel on the device, and a **flip layout** button that rotates the board
-without touching the physics — useful when two people are sitting somewhere no browser can detect.
-Nothing in `?debug`/`?selftest` runs by default.
+maxSpeed, puckMass) for tuning feel on the device. Nothing in `?debug`/`?selftest` runs by default, and
+there is no control for rotating the board: the board does not rotate.
 
 ## Publishing
 
@@ -88,7 +102,7 @@ Deployment is checkable, and worth checking after every push:
 ```
 curl -s https://hal-eisen.github.io/puck-puck-go/ | md5sum   # must match: md5sum index.html
 ./tools/browser-test.sh https://hal-eisen.github.io/puck-puck-go/   # the suite against the live copy
-./tools/browser-test.sh 120 "https://hal-eisen.github.io/puck-puck-go/?layout=tall"   # forced layout too
+WIN=820,1180 ./tools/browser-test.sh 120 https://hal-eisen.github.io/puck-puck-go/   # the live copy, portrait
 ```
 
 The live copy is served with `access-control-allow-origin: *` and no external references, which the

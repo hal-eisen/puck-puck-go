@@ -6,7 +6,7 @@
 #
 # URL defaults to the local file. Pass a deployed URL to run the same suite against what
 # is actually being served - a green local run says nothing about the published copy.
-# The URL may already carry a query, e.g. "?layout=tall", to exercise an override.
+# Set WIN="w,h" to run the whole suite in a browser window of that shape.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 N=${1:-200}
@@ -27,9 +27,9 @@ find_browser() {
 BROWSER=$(find_browser)
 
 # '&' if the URL already has a query, '?' if not. A case pattern like *\?* does NOT match a
-# literal '?' the way it reads, and getting this wrong turns ?layout=tall into
-# ?layout=tall?debug: the override is silently dropped and the suite still goes green,
-# because it is testing a page that was never asked to do the thing under test.
+# literal '?' the way it reads, and getting this wrong appends a second '?' instead: the extra
+# parameters are silently dropped and the suite still goes green, because it is testing a page
+# that was never asked to do the thing under test.
 if [[ "$TARGET" == *'?'* ]]; then sep='&'; else sep='?'; fi
 URL="$TARGET${sep}debug&selftest&n=$N"
 echo "target: $URL"
@@ -38,7 +38,11 @@ EXTRA=''
 if [[ "$TARGET" == file://* ]]; then EXTRA=--allow-file-access-from-files; fi
 
 # Pages serves a ~10 minute cache, so a normal load can test the previous deploy.
+# WIN="W,H" forces the browser window shape (e.g. WIN=820,1180 for a portrait panel): the
+# field is supposed to come out horizontal in every shape, and a suite that only ever sees one
+# shape cannot tell that claim from a probe that was written for the shape it happened to run in.
 FLAGS=(--headless=new --no-sandbox --disable-gpu --disk-cache-size=1 --aggressive-cache-discard)
+[ -n "${WIN:-}" ] && FLAGS+=("--window-size=$WIN")
 [ -n "$EXTRA" ] && FLAGS+=("$EXTRA")
 "$BROWSER" "${FLAGS[@]}" \
   --virtual-time-budget=30000 --dump-dom "$URL" 2>/dev/null \

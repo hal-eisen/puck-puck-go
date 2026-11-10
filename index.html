@@ -52,7 +52,7 @@
 <canvas id="stage"></canvas>
 
 <div class="overlay" id="smallBoard">
-  <div><h1 id="smallTitle">Too small to play</h1><p id="smallMsg">Turn the tablet, or make the window bigger.</p></div>
+  <div><h1 id="smallTitle">Too small to play</h1><p id="smallMsg">The table never turns: it needs a wider window.</p></div>
 </div>
 
 <div class="overlay" id="winner">
@@ -99,10 +99,8 @@ const CONFIG = {
   },
   GAME: { winScore: 5, bannerMs: 1000, celebrationMs: 2000 },
   RENDER: { marginPx: 8, particleCap: 60, dprMax: 3,
-    hudBand: { frac: 0.10, min: 34, max: 72 },              // score strip, along whichever axis has slack
-    layout: 'auto',                 // which way the table's LONG axis points: 'auto' | 'wide' | 'tall'
-    minStonePx: 18,                 // a stone's DIAMETER below this is not playable, in any layout
-    flipMargin: 1.06,               // 'tall' must draw a board 6% bigger to win: no flapping on resize
+    hudBand: { frac: 0.10, min: 34, max: 72 },              // score strip, the band across the top
+    minStonePx: 18,                 // a stone's DIAMETER below this is not playable, in any window
     colors: {
     p1: '#3d8cff', p1dim: '#1d4f9c', p2: '#ff8a3d', p2dim: '#a4501c',
     felt: '#16473e', feltEdge: '#0f352e', line: '#2f6b5f', puck: '#f4f7f4', puckRing: '#1c2b26' } },
@@ -111,12 +109,12 @@ const CONFIG = {
 };
 const P = CONFIG.PHYSICS;
 
-/* ?layout=wide|tall|auto has to be read BEFORE the first fit(), which is why it lives here and
-   not in DEBUG: it is also the escape hatch for a seat we cannot sense. A portrait centre
-   display in a car has both players alongside it, and for that seat the right answer is the
-   smaller 'wide' board, not the bigger 'tall' one. Override costs one constant. */
-const LAYOUT_PARAM = (new URLSearchParams(location.search).get('layout') || '').trim();
-if (LAYOUT_PARAM === 'wide' || LAYOUT_PARAM === 'tall' || LAYOUT_PARAM === 'auto') CONFIG.RENDER.layout = LAYOUT_PARAM;
+/* There is no ?layout= any more, and there is no layout to choose. The two players sit NEXT TO
+   EACH OTHER, one at each end of the table, so the long axis of the field is the axis they sit
+   either end of and it is drawn ACROSS the screen in every window, tall or wide. A knob that
+   rotates the board is not a preference with two valid answers; it is a bug with two seats.
+   Dropping it also drops its failure mode: a second coordinate system, which every draw call,
+   every pixel probe and the whole input path had to be written twice to survive. */
 
 /* ============================== SECTION: GEOMETRY ============================== */
 /* The boundary is a signed-distance field, evaluated per body class:
@@ -665,7 +663,7 @@ const RENDER = {
   canvas: document.getElementById('stage'),
   ctx: null, dpr: 1, scale: 1, cx: 0, cy: 0, W: 0, H: 0, mx: 0, my: 0,
   stat: null, sctx: null, sprites: {}, paths: {}, t: 0,
-  rot: 0, band: 0, bandTop: 0, bandLeft: 0, bandMid: 0,
+  band: 0, bandTop: 0, bandMid: 0,
   init() {
     this.ctx = this.canvas.getContext('2d');
     this.fit();
@@ -679,67 +677,62 @@ const RENDER = {
     const ins = safeInsets();
     const mx = CONFIG.RENDER.marginPx + ins.x, my = CONFIG.RENDER.marginPx + ins.y;
     const dw = GEOM.DRAW.maxX - GEOM.DRAW.minX, dh = GEOM.DRAW.maxY - GEOM.DRAW.minY;
-    /* The same table can be laid down two ways: long axis ACROSS the screen ('wide', players at
-       the left and right edges) or ALONG it ('tall', players at the bottom and top edges). Both
-       are the identical game seen from a different seat, and the physics is never told which one
-       was chosen - so the only honest tie-breaker available to a machine that cannot see the
-       players is which way draws the BIGGER board. Bigger board = bigger stones = aimable in
-       sunlight, which is the reason the PRD asked for landscape in the first place.
-       The scoreboard keeps a reserved strip either way - across the top when wide, down the left
-       when tall - so it is never painted on the felt in either layout (layoutProbe, T26/T27). */
-    const way = (rot) => {
-      const band = this.bandPx(Math.min(W, H));
-      const availW = Math.max(48, W - 2 * mx - (rot ? band : 0));
-      const availH = Math.max(48, H - 2 * my - (rot ? 0 : band));
-      return { rot, band, availW, availH, scale: Math.min(availW / (rot ? dh : dw), availH / (rot ? dw : dh)) };
-    };
-    const wide = way(0), tall = way(1), policy = CONFIG.RENDER.layout;
-    let pick = wide;
-    if (policy === 'tall') pick = tall;
-    else if (policy === 'wide') pick = wide;
-    else if (tall.scale > wide.scale * CONFIG.RENDER.flipMargin) pick = tall;
-    this.rot = pick.rot; this.band = pick.band; this.mx = mx; this.my = my;
-    this.bandTop = my; this.bandLeft = mx;
-    this.bandMid = pick.rot ? H / 2 : my + pick.band / 2;     // centre ALONG the strip's own axis
-    this.W = W; this.H = H; this.dpr = dpr; this.scale = pick.scale;
-    this.cx = pick.rot ? mx + pick.band + pick.availW / 2 : W / 2;
-    this.cy = pick.rot ? H / 2 : my + pick.band + pick.availH / 2;
+    /* ONE layout, in every window: the table lies across the screen, and the two players sit at
+       its left and right ends, side by side in front of the display. So the strip of scoreboard
+       goes across the top - the long side of the table, where nobody is sitting - and both players
+       read it the same way up.
+       A tall window is not a different game and the panel never has to be turned: the board is as
+       wide as the window is, and the height left over is exactly where the scoreboard lives, so
+       the strip costs a tall window NOTHING (T27 measures the field width rather than trusting
+       the drawing). A narrow window gets a narrower board, which is the honest price of the two
+       players sitting where they sit: standing the table up on its end WOULD draw a bigger board
+       on a portrait screen - 1008 px against 752 on the same tablet - and it would be wrong all
+       the same, because the players would then be sitting at its SIDES rather than its ends.
+       What has to survive is legibility, and legibility has a floor rather than an orientation:
+       minStonePx, enforced by PLATFORM.legibilityCheck, measured in rendered stone px. */
+    const band = this.bandPx(Math.min(W, H));
+    const availW = Math.max(48, W - 2 * mx);
+    const availH = Math.max(48, H - 2 * my - band);
+    const scale = Math.min(availW / dw, availH / dh);
+    this.band = band; this.mx = mx; this.my = my;
+    this.bandTop = my;
+    this.bandMid = my + band / 2;              // centre of the strip, along its own (horizontal) axis
+    this.W = W; this.H = H; this.dpr = dpr; this.scale = scale;
+    this.cx = W / 2;
+    this.cy = my + band + availH / 2;
     this.canvas.width = Math.round(W * dpr); this.canvas.height = Math.round(H * dpr);
     this.canvas.style.width = W + 'px'; this.canvas.style.height = H + 'px';
     this.bakeStatic(); this.bakeSprites();
     PLATFORM.legibilityCheck();
   },
+  // Thickness comes from the SHORT side, which turns out to be the right basis for a strip that
+  // only ever runs horizontally: in a tall window the short side is the width, so the strip gets
+  // generous there (it is free - the board is width-limited anyway), and in a flat window the
+  // short side is the height, so the strip shrinks itself precisely where it would cost board.
   bandPx(shortSide) {
     const b = CONFIG.RENDER.hudBand;
     return Math.round(Math.max(b.min, Math.min(shortSide * b.frac, b.max)));
   },
-  /* One world point in, one SCREEN css px out, in BOTH layouts. A 90-degree layout cannot be
-     carried by the old one-dimensional X(x)/Y(y) pair: when the table stands up, a screen x
-     depends on world y. So every draw call, every pixel probe and the entire input path go
-     through pt()/toWorld()/dir(), and there is exactly one frame in this file - the one thing
-     that keeps "you grab the stone you can see" true in either layout. */
-  pt(x, y) {
-    const ax = x * this.scale, ay = -y * this.scale;
-    return this.rot ? { x: this.cx + ay, y: this.cy - ax } : { x: this.cx + ax, y: this.cy + ay };
-  },
-  // world -> screen, exact inverse of pt(): same rotation, opposite sign, no approximation
-  toWorld(px, py) {
-    return this.rot ? { x: (this.cy - py) / this.scale, y: (this.cx - px) / this.scale }
-                    : { x: (px - this.cx) / this.scale, y: (this.cy - py) / this.scale };
-  },
+  /* One world point in, one SCREEN css px out. Every draw call, every pixel probe and the whole
+     input path go through pt()/toWorld()/dir(), so there is exactly one frame in this file. That
+     was load-bearing when the board could stand up; with the field pinned horizontal it is simply
+     the definition of "you grab the stone you can see" - and the tests still read their screen
+     coordinates through it instead of assuming screen x == world x, which is what keeps a probe
+     honest if the field ever moves. */
+  pt(x, y) { return { x: this.cx + x * this.scale, y: this.cy - y * this.scale }; },
+  // world -> screen, exact inverse of pt(): opposite sign, no approximation
+  toWorld(px, py) { return { x: (px - this.cx) / this.scale, y: (this.cy - py) / this.scale }; },
   // world direction -> screen direction (unit-preserving, no translation): the aim arrow speaks this
-  dir(dx, dy) { return this.rot ? { x: -dy, y: -dx } : { x: dx, y: -dy }; },
+  dir(dx, dy) { return { x: dx, y: -dy }; },
   L(v) { return v * this.scale; },
-  // world-aligned rect -> its screen box (a quarter turn keeps an axis-aligned rect axis-aligned)
+  // world-aligned rect -> its screen box
   rect(x0, y0, x1, y1) {
     const a = this.pt(x0, y0), b = this.pt(x1, y1);
     return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
   },
   fieldRect() { return this.rect(GEOM.DRAW.minX, GEOM.DRAW.minY, GEOM.DRAW.maxX, GEOM.DRAW.maxY); },
-  bandRect() {
-    return this.rot ? { x: this.bandLeft, y: this.my, w: this.band, h: this.H - 2 * this.my }
-                    : { x: this.mx, y: this.bandTop, w: this.W - 2 * this.mx, h: this.band };
-  },
+  // the scoreboard's reserved strip: the full width, across the top of the field, always
+  bandRect() { return { x: this.mx, y: this.bandTop, w: this.W - 2 * this.mx, h: this.band }; },
   get metrics() {
     const self = this;
     return { at: (x, y) => self.pt(x, y), fieldHpx: 2 * P.halfH * this.scale, stonePx: P.stoneR * this.scale };
@@ -914,25 +907,16 @@ const RENDER = {
     b.beginPath(); b.moveTo(bx, by); b.lineTo(INPUT.px, INPUT.py); b.stroke();
     b.restore();
   },
-  // The HUD is one box, dots included, and it must fit inside the reserved strip in EITHER
-  // layout - so the box is computed here once and the renderer and the layout probe both read
-  // the same numbers. Each score sits nearest the end that player defends, which is what lets
-  // the pill stay upright and make sense however the table has been laid down.
+  // The HUD is one box, dots included, and it has to fit inside the reserved strip - so the box is
+  // computed here once and the renderer and the layout probe both read the same numbers. P1's
+  // score sits nearest the end of the table that player defends, i.e. nearest the end they are
+  // sitting at, and the strip runs across the top so both players read it the same way up.
   hudBox() {
     const size = Math.max(16, Math.round(Math.min(this.band * 0.60, this.L(0.14))));
     const arm = size * 0.88, half = size * 0.62, pad = size * 0.34, dotR = size * 0.16;
-    if (this.rot) {
-      const x = this.bandLeft + this.band / 2, mid = this.bandMid;   // vertical pill in the gutter
-      return {
-        size, along: 'y', rot: 1,
-        x: x - half - dotR, y: mid - arm - half - pad - dotR, w: 2 * (half + dotR), h: 2 * (arm + half + pad + dotR),
-        p1: { x, y: mid + arm }, p2: { x, y: mid - arm }, dash: { x, y: mid },
-        dot1: { x, y: mid + arm + half + pad }, dot2: { x, y: mid - arm - half - pad },
-      };
-    }
     const y = this.bandMid, mid = this.cx;                            // horizontal pill across the top
     return {
-      size, along: 'x', rot: 0,
+      size, along: 'x',
       x: mid - arm - half - pad - dotR, y: y - half - dotR, w: 2 * (arm + half + pad + dotR), h: 2 * (half + dotR),
       p1: { x: mid - arm, y }, p2: { x: mid + arm, y }, dash: { x: mid, y },
       dot1: { x: mid - arm - half - pad, y }, dot2: { x: mid + arm + half + pad, y },
@@ -1002,38 +986,46 @@ const PLATFORM = {
     if (this.gestureDone) return;
     this.gestureDone = true;
     const el = document.documentElement;
-    if (el.requestFullscreen) el.requestFullscreen({ navigationUI: 'hide' }).then(() => this.lockLayout()).catch(() => {});
+    if (el.requestFullscreen) el.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
     this.requestWake();
   },
-  lockLayout() {
-    // 'auto' deliberately does NOT lock the screen. The layout follows the window, so the tablet
-    // is free to be held or mounted either way and the board just gets as big as it can. Only an
-    // explicit ?layout=wide|tall asks the device to turn, and only where that is even allowed
-    // (Chrome/Android in fullscreen; iPadOS refuses - design doc 11.4).
-    const want = { wide: 'landscape', tall: 'portrait' }[CONFIG.RENDER.layout];
-    const o = screen.orientation;
-    if (want && o && o.lock) o.lock(want).catch(() => {});
-  },
+  /* No screen-orientation lock, and no ?layout= hint that ever asked for one. The field is drawn
+     horizontally whatever the panel is doing, so locking would only be a way of fighting the
+     operating system for no gain: turning the tablet changes the letterboxing, never which end of
+     the table each player is sitting at. iPadOS refuses the API anyway (design doc 11.4), which is
+     a polite way of saying the platform was never going to make this decision for us. */
   async requestWake() {
     try { if (navigator.wakeLock && navigator.wakeLock.request && !document.hidden) this.wake = await navigator.wakeLock.request('screen'); } catch (_) {}
   },
   /* This used to be "portrait => unplayable, rotate". That was a legibility rule wearing an
-     orientation-shaped proxy: what actually has to be true is that a stone is wide enough to aim
-     at and to grab - generously so, because the panel is read in sunlight. The layout now takes
-     whichever direction draws the bigger board, so portrait is no longer a reason to refuse.
-     The overlay is back only for the case that really is unplayable: a viewport too small to
-     produce a legible board in EITHER direction. */
+     orientation-shaped proxy: what has to be true is that a stone is wide enough to aim at and to
+     grab, generously so, because the panel is read in sunlight. With the field pinned horizontal
+     the proxy is gone and only the rule is left - and since the rule is a plain rectangle now it
+     is worth naming out loud: scale has to reach minStonePx per stone diameter, so the window has
+     to offer at least needBoardW x needBoardH px. The panel QUOTES those numbers, which makes them
+     a claim, which makes them a test (T30 takes the promise at its word instead of nodding at it).
+     A narrow window cannot be talked around by turning the board: the fix is width. */
   legibilityCheck() {
-    const got = 2 * P.stoneR * RENDER.scale, need = CONFIG.RENDER.minStonePx;
+    const need = CONFIG.RENDER.minStonePx;
+    const got = 2 * P.stoneR * RENDER.scale;
+    const floorScale = need / (2 * P.stoneR);
+    const dw = GEOM.DRAW.maxX - GEOM.DRAW.minX, dh = GEOM.DRAW.maxY - GEOM.DRAW.minY;
     this.smallPx = got;
+    // Rounded UP, plus one px of slack: floorScale (18/0.09) and 352/1.76 both land a hair off a
+    // whole number in binary floating point, and a promise that is a hair wrong is a promise that
+    // contradicts the overlay it is printed on. T30 loads exactly this rectangle and checks it.
+    this.needBoardW = Math.ceil(floorScale * dw) + 2 * CONFIG.RENDER.marginPx + 1;
+    this.needBoardH = Math.ceil(floorScale * dh) + 2 * CONFIG.RENDER.marginPx + RENDER.bandPx(Math.min(
+      this.needBoardW, Math.ceil(floorScale * dh) + 2 * CONFIG.RENDER.marginPx)) + 1;
     this.tooSmall = got < need;
     const el = document.getElementById('smallBoard');
     el.classList.toggle('on', this.tooSmall);
     if (this.tooSmall) {
       document.getElementById('smallTitle').textContent = 'Too small to play';
       document.getElementById('smallMsg').textContent =
-        'Stones are ' + got.toFixed(0) + ' px wide here; the game needs at least ' + need +
-        ' px. Turn the tablet, or make the window bigger.';
+        'Stones are ' + got.toFixed(0) + ' px wide here; the game needs at least ' + need + ' px. ' +
+        'The table never turns, so it needs a window at least ' + this.needBoardW + ' x ' + this.needBoardH +
+        ' px - make the window wider, or bigger.';
     }
     return this.tooSmall;
   },
@@ -1047,10 +1039,11 @@ const PLATFORM = {
   },
   hideWinner() { document.getElementById('winner').classList.remove('on'); },
 };
-/* Insets are PER AXIS, because a notch lives on one edge and which edge that is depends on
-   which way the panel is turned. 'wide' pays for left/right, 'tall' for top/bottom - and now
-   that portrait is a legal layout, a top notch is reachable for the first time. A single max()
-   over all four insets would shrink the board on every panel to pay for an inset it does not
+/* Insets are PER AXIS, because a notch owns one edge and which edge that is depends on how the
+   panel is mounted - and the panel gets mounted portrait as well as landscape now. A top inset
+   may cost vertical room and must cost no width at all; a left inset the other way round, where
+   it costs real board, because the field is width-limited in a tall window. A single max() over
+   all four insets would shrink the board on every device to pay for an inset that device does not
    have, which is exactly how a legibility fix costs you a legibility win. */
 function safeInsets() {
   const s = getComputedStyle(document.documentElement);
@@ -1098,9 +1091,6 @@ const DEBUG = {
     const b3 = document.createElement('button'); b3.textContent = 'ascii map';
     b3.addEventListener('click', () => DEBUG.dumpAscii());
     d.appendChild(b3);
-    const b4 = document.createElement('button'); b4.textContent = 'flip layout';
-    b4.addEventListener('click', () => { CONFIG.RENDER.layout = RENDER.rot ? 'wide' : 'tall'; RENDER.fit(); });
-    d.appendChild(b4);
     const b2 = document.createElement('button'); b2.textContent = 'force settle';
     b2.addEventListener('click', () => { for (const b of GAME.sim.world.bodies) { b.vx = 0; b.vy = 0; b.resting = true; } });
     d.appendChild(b1); d.appendChild(b2);
@@ -1163,13 +1153,16 @@ const DEBUG = {
 
 /* ============================== SECTION: BOOT ============================== */
 const BOOT = {
-  last: 0, firstFit: null,
+  last: 0, firstFit: null,   // the first fit(), snapshotted for T31
   init() {
     window.addEventListener('error', (e) => DEBUG.report('ERR ' + (e.message || e.error || e)));
     RENDER.init();
-    // recorded for T31: the layout override has to be in place BEFORE this first fit(), and
-    // that ordering is invisible until someone loads ?layout= and gets the other layout
-    this.firstFit = { layout: CONFIG.RENDER.layout, rot: RENDER.rot };
+    // recorded for T31: everything that has to be true of the FIRST painted frame. A band, an
+    // inset or a config value that only lands on the next resize shows up as a board that is
+    // briefly wrong on load - invisible in a screenshot of a settled page, and the exact shape of
+    // the bug the old ?layout= hit (it was parsed in DEBUG.init, which ran after RENDER.init).
+    const ff = RENDER.fieldRect();
+    this.firstFit = { W: RENDER.W, H: RENDER.H, scale: RENDER.scale, band: RENDER.band, fw: ff.w, fh: ff.h };
     PLATFORM.init();
     INPUT.attach(RENDER.canvas);
     DEBUG.init();
@@ -1446,12 +1439,13 @@ function runSelfTests(n = 1000) {
   return out;
 }
 
-/* The layout probe, run once per orientation. Does the scoreboard really stay in its own strip,
-   clear of the felt, and has the board really given up that much of the viewport? Geometry plus
-   real painted pixels - checking one orientation only would have caught nothing, since the
-   scoreboard bug this guards was only ever visible in the other one. */
+/* The layout probe, run once per window SHAPE. Does the scoreboard really stay in its own strip,
+   clear of the felt, has the board really given up that much of the viewport, and is the felt
+   rectangle still WIDER than it is tall? Geometry plus real painted pixels - checking one window
+   shape only would have caught nothing, since the scoreboard bug this guards was only ever
+   visible in the other shape. */
 function layoutProbe() {
-  const hb = RENDER.hudBox(), band = RENDER.bandRect(), fr = RENDER.fieldRect(), rot = !!RENDER.rot;
+  const hb = RENDER.hudBox(), band = RENDER.bandRect(), fr = RENDER.fieldRect();
   const cx2 = RENDER.canvas.getContext('2d'), d = RENDER.dpr;
   const at = (sx, sy) => {
     const g = cx2.getImageData(Math.round(sx * d), Math.round(sy * d), 1, 1).data;
@@ -1461,78 +1455,113 @@ function layoutProbe() {
                  hb.x + hb.w <= band.x + band.w + 0.5 && hb.y + hb.h <= band.y + band.h + 0.5;
   const clearOfField = hb.x + hb.w <= fr.x + 0.5 || hb.x >= fr.x + fr.w - 0.5 ||
                        hb.y + hb.h <= fr.y + 0.5 || hb.y >= fr.y + fr.h - 0.5;
-  const along = rot ? 'w' : 'h', viewport = rot ? RENDER.W : RENDER.H;
-  // the strip eats the axis it lies along, so the margins that shrink it are the ones on
-  // THAT axis: left/right for a vertical strip, top/bottom for a horizontal one
-  const cross = rot ? RENDER.mx : RENDER.my;
-  const shortened = fr[along] <= viewport - 2 * cross - RENDER.band + 1;
+  // the strip lies along x, so the axis it eats is the vertical one, and the margins that shrink
+  // it are the top/bottom ones
+  const shortened = fr.h <= RENDER.H - 2 * RENDER.my - RENDER.band + 1;
+  // the requirement itself, measured off the painted geometry rather than off a flag
+  const horizontal = fr.w > fr.h;
   // sample the pill's fill in the gap between a score digit and the turn dot - the one spot
-  // that is provably clear of both glyphs in either layout (digits end at 1.23 size from the
-  // dash, dots start at 1.68), so this cannot land on a number and report the HUD unpainted
+  // that is provably clear of both glyphs (digits end at 1.23 size from the dash, dots start at
+  // 1.68), so this cannot land on a number and report the HUD unpainted
   const ux = hb.p2.x - hb.p1.x, uy = hb.p2.y - hb.p1.y, ul = Math.hypot(ux, uy) || 1;
   const pillAt = { x: hb.dash.x + (ux / ul) * hb.size * 1.45, y: hb.dash.y + (uy / ul) * hb.size * 1.45 };
-  const stripAt = rot ? { x: band.x + band.w / 2, y: band.y + 8 } : { x: band.x + 8, y: band.y + band.h / 2 };
-  const feltAt = rot ? { x: fr.x + 6, y: fr.y + fr.h / 2 } : { x: fr.x + fr.w / 2, y: fr.y + 6 };
+  const stripAt = { x: band.x + 8, y: band.y + band.h / 2 };
+  const feltAt = { x: fr.x + fr.w / 2, y: fr.y + 6 };
   const pill = at(pillAt.x, pillAt.y), strip = at(stripAt.x, stripAt.y), felt = at(feltAt.x, feltAt.y);
   const painted = pill[0] < strip[0] - 2 && pill[1] < strip[1] - 2 && pill[2] < strip[2] - 2;
   const feltIsNotStrip = Math.abs(felt[1] - strip[1]) > 6;
   const fitsInViewport = fr.x >= RENDER.mx - 0.5 && fr.y >= RENDER.my - 0.5 &&
                          fr.x + fr.w <= RENDER.W - RENDER.mx + 0.5 && fr.y + fr.h <= RENDER.H - RENDER.my + 0.5;
   return {
-    ok: inBand && clearOfField && shortened && painted && feltIsNotStrip && fitsInViewport,
+    ok: inBand && clearOfField && shortened && horizontal && painted && feltIsNotStrip && fitsInViewport,
     why: 'hud[' + hb.x.toFixed(0) + ',' + hb.y.toFixed(0) + ' ' + hb.w.toFixed(0) + 'x' + hb.h.toFixed(0) +
          '] band[' + band.x.toFixed(0) + ',' + band.y.toFixed(0) + ' ' + band.w.toFixed(0) + 'x' + band.h.toFixed(0) +
          '] field[' + fr.x.toFixed(0) + ',' + fr.y.toFixed(0) + ' ' + fr.w.toFixed(0) + 'x' + fr.h.toFixed(0) + ']' +
-         ' inBand=' + inBand + ' clear=' + clearOfField + ' shortened=' + shortened +
+         ' inBand=' + inBand + ' clear=' + clearOfField + ' shortened=' + shortened + ' longAxisAcross=' + horizontal +
          ' painted=' + painted + ' felt!=' + 'strip=' + feltIsNotStrip + ' inViewport=' + fitsInViewport +
          ' stripPx=' + strip + ' pillPx=' + pill + ' edgePx=' + felt,
   };
 }
 
-/* Layout is a second coordinate system, so it gets what the physics got: measured, not eyeballed.
-   window.innerWidth/Height are read-only, so they are redefined for the probe and put back after. */
+/* The table has exactly one orientation, so what this harness holds is not "which way did we lay
+   the table" but "the long axis stayed ACROSS the window in every shape, and the shape cost only
+   what it had to cost". Measured off the painted geometry, because a flag can lie and a rectangle
+   cannot. window.innerWidth/Height are read-only, so they are redefined here and put back after. */
 function layoutChecks() {
   const out = []; const T = (id, ok, msg) => out.push((ok ? 'PASS ' : 'FAIL ') + id + '  ' + msg);
-  // T31: ?layout= has to be in place before the FIRST fit(). It used to be read in DEBUG.init,
-  // which runs after RENDER.init, so the override only landed on the next resize: a portrait
-  // screen that explicitly asked for 'wide' got 'tall' on load and nothing complained.
+  const dw = GEOM.DRAW.maxX - GEOM.DRAW.minX, dh = GEOM.DRAW.maxY - GEOM.DRAW.minY;
+
+  // T31: the FIRST fit() is already the final layout. Inset, band or config that arrives on the
+  // next resize instead looks fine in a screenshot of a settled page; the old ?layout= hit exactly
+  // that (parsed in DEBUG.init, which runs after RENDER.init), so the first frame is snapshotted
+  // at BOOT and asserted rather than assumed.
   {
-    const ff = BOOT.firstFit || {};
-    const wantRot = { wide: 0, tall: 1 }[ff.layout];
-    T('T31 layoutParamAppliesAtLoad', wantRot === undefined || ff.rot === wantRot,
-      'param=' + (ff.layout || '(none)') + ' rotAtFirstFit=' + ff.rot +
-      ' search=' + JSON.stringify(location.search) + ' firstFitRecorded=' + !!BOOT.firstFit);
+    const ff = BOOT.firstFit;
+    const aspect = dw / dh;
+    RENDER.fit();                                   // same window: fit() must be a fixed point
+    const drift = ff ? Math.abs(RENDER.scale - ff.scale) : 1;
+    T('T31 firstFrameIsFinalLayout',
+      !!ff && ff.fw > ff.fh && Math.abs(ff.fw / ff.fh - aspect) < 0.01 && ff.band > 0 && drift < 1e-9,
+      'loadWindow=' + (ff && ff.W) + 'x' + (ff && ff.H) + ' firstFrameField=' +
+      (ff && ff.fw.toFixed(0)) + 'x' + (ff && ff.fh.toFixed(0)) + ' (want ' + aspect.toFixed(2) +
+      ':1 with the long axis across) band=' + (ff && ff.band) + 'px refitDrift=' + drift.toExponential(1));
   }
+
   const real = { w: window.innerWidth, h: window.innerHeight };
   const view = (w, h) => {
     Object.defineProperty(window, 'innerWidth', { value: w, configurable: true });
     Object.defineProperty(window, 'innerHeight', { value: h, configurable: true });
   };
   const settle = () => { GAME.newMatch(); RENDER.frame(performance.now()); };
-  const lay = (which) => { CONFIG.RENDER.layout = which; RENDER.fit(); settle(); };
-  const PE = (id, x, y) => ({ pointerId: id, pointerType: 'touch', clientX: x, clientY: y, button: 0, cancelable: true });
+  const shape = (w, h) => { view(w, h); RENDER.fit(); settle(); };
   const restore = () => {
     Object.defineProperty(window, 'innerWidth', { value: real.w, configurable: true });
     Object.defineProperty(window, 'innerHeight', { value: real.h, configurable: true });
-    CONFIG.RENDER.layout = 'auto'; RENDER.fit(); settle();
+    RENDER.fit(); settle();
   };
+  const PE = (id, x, y) => ({ pointerId: id, pointerType: 'touch', clientX: x, clientY: y, button: 0, cancelable: true });
 
-  // T27: turning the same tablet must cost nothing. A portrait window lays the table along its
-  // long axis, and the board comes out the SAME size as in landscape - because the layout is
-  // chosen by the room available, not by the shape the vendor happened to call 'landscape'.
-  view(768, 1024); lay('auto');
-  const tall = { rot: RENDER.rot, scale: RENDER.scale, probe: layoutProbe(), stone: 2 * P.stoneR * RENDER.scale };
-  view(1024, 768); lay('auto');
-  const wide = { rot: RENDER.rot, scale: RENDER.scale, probe: layoutProbe() };
-  const sameBoard = Math.abs(tall.scale - wide.scale) / wide.scale < 0.01;
-  T('T27 layoutFollowsWindow', tall.rot === 1 && wide.rot === 0 && sameBoard && tall.probe.ok && wide.probe.ok,
-    'portrait rot=' + tall.rot + ' scale=' + tall.scale.toFixed(1) + ' stone=' + tall.stone.toFixed(1) +
-    'px | landscape rot=' + wide.rot + ' scale=' + wide.scale.toFixed(1) +
-    ' | sameSize=' + sameBoard + ' | tall: ' + tall.probe.why + ' | wide: ' + wide.probe.why);
+  // T27: the requirement the whole layout exists to satisfy, tested as a requirement and not as a
+  // mode switch. Two players sit NEXT TO EACH OTHER at the two ENDS of the table, so in every
+  // window shape the felt rectangle must be wider than it is tall, world +x must be screen-right,
+  // P1's goal must be at the left end, and the board must really have used the width it was given.
+  // The shapes include the tall ones, where standing the table on end would draw a BIGGER board
+  // and would still be wrong - the players would be sitting at its sides.
+  const SHAPES = [
+    { name: 'portraitTablet 768x1024', w: 768, h: 1024 },
+    { name: 'landscapeTablet 1024x768', w: 1024, h: 768 },
+    { name: 'tallNarrow 600x1200', w: 600, h: 1200 },
+    { name: 'shortWide 1280x560', w: 1280, h: 560 },
+  ];
+  const rows = [];
+  for (const s of SHAPES) {
+    shape(s.w, s.h);
+    const fr = RENDER.fieldRect(), d = RENDER.dir(1, 0), prb = layoutProbe();
+    const leftEnd = RENDER.pt(-P.halfW, 0), rightEnd = RENDER.pt(P.halfW, 0);
+    const widthLimited = (s.w - 2 * RENDER.mx) / dw < (s.h - 2 * RENDER.my - RENDER.band) / dh;
+    rows.push({
+      s, fr, probe: prb,
+      across: fr.w > fr.h,
+      east: Math.abs(d.x - 1) < 1e-9 && Math.abs(d.y) < 1e-9,
+      ends: leftEnd.x < rightEnd.x,
+      usedWidth: !widthLimited || fr.w >= s.w - 2 * RENDER.mx - 1,
+      stone: 2 * P.stoneR * RENDER.scale,
+      legible: 2 * P.stoneR * RENDER.scale >= CONFIG.RENDER.minStonePx,
+    });
+  }
+  const bad = rows.filter((r) => !(r.across && r.east && r.ends && r.usedWidth && r.probe.ok && r.legible));
+  const por = rows[0], lan = rows[1];
+  T('T27 fieldAlwaysHorizontal', bad.length === 0,
+    rows.map((r) => r.s.name + ': field=' + r.fr.w.toFixed(0) + 'x' + r.fr.h.toFixed(0) +
+      ' longAxisAcross=' + r.across + ' +xIsRight=' + r.east + ' p1GoalLeft=' + r.ends +
+      ' usedWidth=' + r.usedWidth + ' stone=' + r.stone.toFixed(1) + 'px probe=' + r.probe.ok).join(' | ') +
+    ' || same tablet, portrait vs landscape board width ' + por.fr.w.toFixed(0) + 'px vs ' + lan.fr.w.toFixed(0) +
+    'px (a tall window is not a free lunch: it is a narrower board, taken lying down)' +
+    (bad.length ? ' || FAIL ' + bad.map((r) => r.s.name + (r.probe.ok ? '' : ' :: ' + r.probe.why)).join(' ; ') : ''));
 
-  // T28: a layout is a display choice, not a game rule. pt() and toWorld() must be exact
-  // inverses in both directions (that is what "grab the stone you can see" means), and the same
-  // shot must produce bit-identical physics whichever way the table is standing.
+  // T28: a window shape is a display fact, not a game rule. pt()/toWorld() stay exact inverses at
+  // every shape, dir() keeps unit length, and one scripted shot still produces a bit-identical
+  // trace - the same physics the node harness runs, whichever way the window happens to stand.
   const samples = [[0, 0], [P.halfW, P.mouthHalf], [-0.65, 0.15], [P.halfW + P.goalDepth, 0], [-0.5, -0.4]];
   let worst = 0;
   const trace = () => {
@@ -1542,85 +1571,107 @@ function layoutChecks() {
     for (let i = 0; i < 240; i++) GAME.update(1 / 60);
     return GAME.sim.world.bodies.map((b) => b.x.toFixed(9) + ',' + b.y.toFixed(9)).join(';');
   };
-  for (const which of ['wide', 'tall']) {
-    lay(which);
+  const traces = [];
+  for (const s of SHAPES) {
+    shape(s.w, s.h);
     for (const [x, y] of samples) {
       const p = RENDER.pt(x, y), w = RENDER.toWorld(p.x, p.y), dd = RENDER.dir(1, 0);
       worst = Math.max(worst, Math.abs(w.x - x), Math.abs(w.y - y));
       if (Math.abs(Math.hypot(dd.x, dd.y) - 1) > 1e-12) worst = 1e9;      // directions stay unit length
     }
+    traces.push(trace());
   }
-  lay('wide'); const tWide = trace();
-  lay('tall'); const tTall = trace();
-  T('T28 layoutIsDisplayOnly', worst < 1e-9 && tWide === tTall,
-    'roundTripErr=' + worst.toExponential(1) + ' traceIdentical=' + (tWide === tTall));
+  const identical = traces.every((t) => t === traces[0]);
+  T('T28 windowShapeIsDisplayOnly', worst < 1e-9 && identical,
+    'shapes=' + traces.length + ' roundTripErr=' + worst.toExponential(1) + ' tracesIdentical=' + identical);
 
-  // T29: the aim path is where a rotation would break the game. Pull DOWN-screen in the tall
-  // layout: that is world -x, so the stone must fly world +x - and on screen, UP the display,
-  // into the far goal. A sign error here makes the game unplayable and no screenshot shows why.
-  lay('tall');
+  // T29: the aim path is where a layout used to break the game, so it gets run in the shape that
+  // used to be dangerous: the narrowest tall window. Pull toward the LEFT end of the table (screen
+  // -x, which is world -x, since the long axis is across the screen like always) and the stone has
+  // to fly world +x - which is screen +x, toward the goal at the right-hand end. A sign error here
+  // makes the game unplayable and no screenshot shows why; it just looks like the finger is wrong.
+  shape(600, 1200);
   GAME.enter('Aiming');
   const st = GAME.sim.world.stones.filter((s) => s.owner === GAME.turn)[0];
   const mt = RENDER.metrics, dead = mt.stonePx + CONFIG.AIM.deadZonePx;
   const maxDrag = CONFIG.AIM.maxDragFraction * mt.fieldHpx;
   const drag = Math.round(dead + 0.5 * (maxDrag - dead));
+  const u = RENDER.dir(1, 0);                       // where the right-hand goal is, on screen
   const p0 = RENDER.pt(st.x, st.y);
+  const pull = { x: p0.x - u.x * drag, y: p0.y - u.y * drag };
   INPUT.onDown(PE(201, p0.x, p0.y));
-  INPUT.onDown(PE(901, p0.x + 40, p0.y + 40));                 // a stray finger alongside the pull
-  INPUT.onMove(PE(201, p0.x, p0.y + drag));
+  const grabbed = INPUT.body === st;
+  INPUT.onDown(PE(901, p0.x + 40, p0.y + 40));      // a stray finger alongside the pull
+  INPUT.onMove(PE(201, pull.x, pull.y));
   const a = INPUT.current();
-  const screenDown = a && Math.abs(RENDER.dir(a.dir.x, a.dir.y).y) > 0.99;
-  INPUT.onUp(PE(201, p0.x, p0.y + drag));
-  const fliesRight = a && a.dir.x > 0.99 && Math.abs(a.dir.y) < 0.01;
-  const upTheScreen = RENDER.dir(a.dir.x, a.dir.y).y < -0.99;
+  const shot = a ? RENDER.dir(a.dir.x, a.dir.y) : { x: 0, y: 0 };
+  const stateAtUp = GAME.state;
+  INPUT.onUp(PE(201, pull.x, pull.y));              // the release is the shot
+  const fliesRight = !!a && a.dir.x > 0.99 && Math.abs(a.dir.y) < 0.01;   // world +x
+  const towardRightGoal = shot.x > 0.99 && Math.abs(shot.y) < 0.01;      // and screen +x: same sentence
   const moving = st.vx > 1e-9;
-  const vx0 = st.vx;                                   // captured at launch, not after settling
+  const vx0 = st.vx;                                // captured at launch, not after settling
   for (let i = 0; i < 240 && (GAME.state === 'Simulating' || GAME.state === 'Settling'); i++) GAME.update(1 / 60);
-  T('T29 aimSurvivesTallLayout', fliesRight && upTheScreen && moving && screenDown,
-    'pull=down-screen(' + drag + 'px) dir=' + (a && a.dir.x.toFixed(3)) + ',' + (a && a.dir.y.toFixed(3)) +
-    ' screenDir=' + RENDER.dir(a.dir.x, a.dir.y).x.toFixed(2) + ',' + RENDER.dir(a.dir.x, a.dir.y).y.toFixed(2) +
-    ' launched=' + moving + ' vxAtLaunch=' + vx0.toFixed(3));
+  T('T29 aimSurvivesTallWindow', fliesRight && towardRightGoal && moving,
+    'window=600x1200 stone=' + st.x.toFixed(2) + ',' + st.y.toFixed(2) + ' drawnAt=' + p0.x.toFixed(0) + ',' +
+    p0.y.toFixed(0) + ' grabbed=' + grabbed + ' state=' + stateAtUp + ' pulledLeftBy=' + drag + 'px power=' +
+    (a && a.power.toFixed(2)) + ' worldDir=' + (a && a.dir.x.toFixed(3)) + ',' + (a && a.dir.y.toFixed(3)) +
+    ' screenDir=' + shot.x.toFixed(2) + ',' + shot.y.toFixed(2) + ' launched=' + moving + ' vxAtLaunch=' + vx0.toFixed(3));
 
-  // T30: the overlay is now a legibility gate, not an orientation gate.
-  view(1024, 768); lay('auto');
+  // T30: the gate is legibility, not orientation - and the panel now QUOTES the rectangle it
+  // needs, so that number is a claim and gets tested. Take the promise at its word: a window of
+  // exactly the advertised size has to come out legible. Half a pixel of tolerance, because
+  // 352/1.76 lands on a float boundary and no player cares which side of 1e-14 it falls on.
+  shape(1024, 768);
   const roomy = !PLATFORM.tooSmall && !document.getElementById('smallBoard').classList.contains('on');
   const roomyPx = PLATFORM.smallPx;
-  view(320, 300); lay('auto');
+  shape(320, 300);
   const tiny = PLATFORM.tooSmall && document.getElementById('smallBoard').classList.contains('on');
-  const tinyPx = PLATFORM.smallPx, tinyRot = RENDER.rot;
+  const tinyPx = PLATFORM.smallPx, needW = PLATFORM.needBoardW, needH = PLATFORM.needBoardH;
+  shape(needW, needH);
+  const promisedPx = PLATFORM.smallPx;
+  const promisedBlocked = PLATFORM.tooSmall;
+  const promisedField = RENDER.fieldRect();
   restore();
-  T('T30 legibilityGate', roomy && tiny,
+  T('T30 legibilityGate', roomy && tiny && !promisedBlocked && promisedPx >= CONFIG.RENDER.minStonePx - 0.05,
     '1024x768 stone=' + roomyPx.toFixed(1) + 'px blocked=' + !roomy +
-    ' | 320x300 stone=' + tinyPx.toFixed(1) + 'px rot=' + tinyRot +
-    ' blocked=' + tiny + ' floor=' + CONFIG.RENDER.minStonePx + 'px');
-  // T32: safe-area insets are PER AXIS. A notch sits on one edge, and which edge that is
-  // depends on which way the panel is turned - so a top inset may cost vertical room and must
-  // cost no horizontal room at all. The tempting one-liner, max() over all four insets, shrinks
-  // the board on every device to pay for an inset that device does not have, which quietly
-  // gives back the legibility that 'tall' exists to buy.
+    ' | 320x300 stone=' + tinyPx.toFixed(1) + 'px blocked=' + tiny +
+    ' | panel promises ' + needW + 'x' + needH + ' -> field=' + promisedField.w.toFixed(0) + 'x' +
+    promisedField.h.toFixed(0) + ' stone=' + promisedPx.toFixed(2) + 'px blocked=' + promisedBlocked +
+    ' | floor=' + CONFIG.RENDER.minStonePx + 'px (no orientation escape: the fix is width)');
+
+  // T32: safe-area insets stay PER AXIS. A notch owns one edge, and which edge that is depends on
+  // how the panel is mounted - so a top inset may cost vertical room and must cost no width, while
+  // a left inset costs width, which in a tall window is the axis that actually sets the board.
+  // The tempting one-liner, max() over all four insets, shrinks the board on every device to pay
+  // for an inset that device does not have.
   {
     const m = CONFIG.RENDER.marginPx, el = document.documentElement;
     const probe = (prop) => {
-      el.style.setProperty(prop, '44px');
+      if (prop) el.style.setProperty(prop, '44px');
       RENDER.fit();
-      const out = { mx: RENDER.mx, my: RENDER.my, band: RENDER.bandRect(), fr: RENDER.fieldRect() };
-      el.style.removeProperty(prop);
-      return out;
+      const got = { mx: RENDER.mx, my: RENDER.my, band: RENDER.bandRect(), fr: RENDER.fieldRect() };
+      if (prop) el.style.removeProperty(prop);
+      return got;
     };
-    view(768, 1024); lay('tall');
-    const tTop = probe('--inset-t'), tLeft = probe('--inset-l');
-    view(1024, 768); lay('wide');
-    const wTop = probe('--inset-t'), wLeft = probe('--inset-l');
+    view(768, 1024);
+    const pNone = probe(null), pTop = probe('--inset-t'), pLeft = probe('--inset-l');
+    view(1024, 768);
+    const qTop = probe('--inset-t'), qLeft = probe('--inset-l');
     restore();
-    const perAxis = tTop.mx === m && tTop.my === m + 44 && tLeft.my === m && tLeft.mx === m + 44 &&
-                    wTop.mx === m && wTop.my === m + 44 && wLeft.my === m && wLeft.mx === m + 44;
+    const perAxis = pTop.mx === m && pTop.my === m + 44 && pLeft.my === m && pLeft.mx === m + 44 &&
+                    qTop.mx === m && qTop.my === m + 44 && qLeft.my === m && qLeft.mx === m + 44;
     // nothing - scoreboard strip or felt - may be drawn inside the region the notch owns
-    const clear = tTop.band.y >= m + 44 - 0.5 && tTop.fr.y >= m + 44 - 0.5 &&
-                  tLeft.band.x >= m + 44 - 0.5 && tLeft.fr.x >= m + 44 - 0.5;
-    T('T32 safeInsetsPerAxis', perAxis && clear,
-      'tall: top44 -> mx=' + tTop.mx + ' my=' + tTop.my + ' left44 -> mx=' + tLeft.mx + ' my=' + tLeft.my +
-      ' | wide: top44 -> mx=' + wTop.mx + ' my=' + wTop.my + ' left44 -> mx=' + wLeft.mx + ' my=' + wLeft.my +
-      ' | notchClear=' + clear);
+    const clear = pTop.band.y >= m + 44 - 0.5 && pTop.fr.y >= m + 44 - 0.5 &&
+                  pLeft.band.x >= m + 44 - 0.5 && pLeft.fr.x >= m + 44 - 0.5;
+    // and the cost has to land on the right axis: in a width-limited portrait window a top inset
+    // takes no board width at all, while a left inset takes exactly what it says on the tin
+    const onTheRightAxis = Math.abs(pTop.fr.w - pNone.fr.w) < 0.5 && pLeft.fr.w <= pNone.fr.w - 40;
+    T('T32 safeInsetsPerAxis', perAxis && clear && onTheRightAxis,
+      'portrait768x1024 plain: fieldW=' + pNone.fr.w.toFixed(0) + ' | top44 -> mx=' + pTop.mx + ' my=' + pTop.my +
+      ' fieldW=' + pTop.fr.w.toFixed(0) + ' | left44 -> mx=' + pLeft.mx + ' my=' + pLeft.my +
+      ' fieldW=' + pLeft.fr.w.toFixed(0) + ' | landscape1024x768: top44 -> mx=' + qTop.mx + ' my=' + qTop.my +
+      ' left44 -> mx=' + qLeft.mx + ' my=' + qLeft.my + ' | notchClear=' + clear + ' costOnRightAxis=' + onTheRightAxis);
   }
   return out;
 }
@@ -1678,10 +1729,10 @@ function renderChecks() {
   // fatal in a grab-what-you-see tabletop game. Measure the drawn disc, don't trust the bake.
   const bg = px(0.15, -0.30);
   const d2 = (a, b) => (a && b) ? Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) : 1e9;
-  /* Which WORLD axis a screen sweep runs along depends on the layout, and the field markings
-     (centre line, centre circle) are world-aligned: sweep the wrong way in 'tall' and you read
-     the centre line as if it were the puck. So walk outward from the centre on BOTH axes, stop
-     at the first non-body pixel (a separate marking can't stretch the run), and keep the
+  /* The field markings (centre line, centre circle) are world-aligned and the puck sits on top of
+     one of them: a horizontal screen sweep through the puck runs along the centre line, and a
+     naive scan reads that line as a very wide puck. So walk outward from the centre on BOTH axes,
+     stop at the first non-body pixel (a separate marking can't stretch the run), and keep the
      NARROWER axis. A one-radius sprite offset still shows up as mid != 0 on both. */
   const measure = (wx, wy, rPx, isOn) => {
     const cc = RENDER.pt(wx, wy), span = Math.ceil(rPx + 6);
@@ -1707,16 +1758,16 @@ function renderChecks() {
   const fr11 = RENDER.fieldRect();
   const fits = RENDER.scale > 0 && fr11.x >= RENDER.mx - 0.5 && fr11.y >= RENDER.my - 0.5 &&
                fr11.x + fr11.w <= RENDER.W - RENDER.mx + 0.5 && fr11.y + fr11.h <= RENDER.H - RENDER.my + 0.5;
-  T('T11 aspectFit', fits, 'layout=' + (RENDER.rot ? 'tall' : 'wide') + ' scale=' + RENDER.scale.toFixed(1) +
+  T('T11 aspectFit', fits, 'table=horizontal scale=' + RENDER.scale.toFixed(1) +
     ' stonePx=' + (P.stoneR * RENDER.scale).toFixed(1) +
     ' puckPx=' + (P.puckR * RENDER.scale).toFixed(1) +
     ' maxDragPx=' + (CONFIG.AIM.maxDragFraction * 2 * P.halfH * RENDER.scale).toFixed(0) +
     ' grabPx=' + (P.stoneR * RENDER.scale + Math.max(CONFIG.AIM.grabTolerancePx, CONFIG.AIM.grabToleranceRatio * P.stoneR * RENDER.scale)).toFixed(1));
   // T26: the score lives in its own strip - never on the felt - and the board has really been
-  // shortened by it. layoutProbe also runs against a portrait window in T27, so neither
-  // orientation can quietly reintroduce the overlap that playtest caught.
+  // shortened by it. layoutProbe also runs against four window shapes in T27, so no shape can
+  // quietly reintroduce the overlap that playtest caught.
   const sep = layoutProbe();
-  T('T26 hudClearOfField', sep.ok, 'layout=' + (RENDER.rot ? 'tall' : 'wide') + ' band=' + RENDER.band + 'px ' + sep.why);
+  T('T26 hudClearOfField', sep.ok, 'table=horizontal band=' + RENDER.band + 'px ' + sep.why);
   return out;
 }
 
