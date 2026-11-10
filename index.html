@@ -383,7 +383,12 @@ function mulberry32(seed) {
     return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
   };
 }
-const SEED = Number(new URLSearchParams(location.search).get('seed') || 20261109);
+/* ?seed= pins the run for reproducible debugging and for the self-tests. Without it the seed
+   is fresh per page load, because the PRD asks for a random first player - a constant default
+   made every match start with the same player, which is not random, just predictable.
+   Physics stays reproducible either way: launches are quantized from input, not from this. */
+const SEED_PARAM = new URLSearchParams(location.search).get('seed');
+const SEED = SEED_PARAM === null ? ((Math.random() * 0x100000000) >>> 0) : Number(SEED_PARAM);
 const rand = mulberry32(SEED);
 
 /* ============================== SECTION: GAME ============================== */
@@ -1439,6 +1444,16 @@ function gameChecks() {
   T('T21 fullMatch', over && legal && bad === 0 && GAME.sim.world.violations.length === 0 && shots >= 5,
     'state=' + GAME.state + ' score=' + GAME.score.join('-') + ' shots=' + shots + ' nonFinite=' + bad + ' viol=' + GAME.sim.world.violations.length);
   GAME.rematch();
+
+  // T24: first player varies match to match, and every new match starts at 0-0 in Kickoff
+  let flips = 0, prev = GAME.startPlayer;
+  for (let i = 0; i < 12; i++) {
+    GAME.newMatch();
+    if (GAME.startPlayer !== prev) flips++;
+    prev = GAME.startPlayer;
+    if (GAME.score[0] !== 0 || GAME.score[1] !== 0 || GAME.state !== 'Kickoff') { flips = -1; break; }
+  }
+  T('T24 randomStart', flips >= 1, 'flips=' + flips + ' seed=' + SEED + ' startPlayers=' + GAME.startPlayer);
   return out;
 }
 

@@ -686,7 +686,10 @@ The PRD's hardest criteria are numeric, so the test lives in the artifact and ru
 | **T5** | Fire identical quantized shot 50× | identical final positions to the last bit | determinism |
 | **T6** | Bank shots: single wall at 30/45/60°, plus each corner arc | exit angle within tolerance of specular; log table for human review | predictable ricochets |
 | **T7** | Puck parked against each wall/mouth-post at rest | nudge moves it ≥ 1 puck radius clear without scoring | wall nudge |
-| **T8** | Frame-rate probe: 10-body pileup, 5 s, with rendering on | ≥ 58 fps p5, no frame > 25 ms | 60 fps during pileup |
+| **T8** | 60 random max-power shots into the full 11-body board | every settle ≤ `settleCap` (12 s); p50/p95/max reported | no stuck/forever-rolling board |
+| **T22** | 20,000 `step()` calls on the full board, wall clock | physics `< 4 ms` of the 16.7 ms frame budget | 60 fps (numeric gate) |
+
+The frame-rate criterion is **not** measured by a headless run: a virtual-time budget freezes the clock, and T22 says so out loud rather than reporting a fake 0.00 ms. On the tablet, `?debug` prints live fps and the worst-case sub-step count next to the field during exactly the pileup that matters.
 
 `T1`/`T1b` are the ones that would otherwise be untestable by a human, and `T1b` in particular is the case a naive implementation passes by luck. Report is a one-line `PASS/FAIL` per ID with numbers, printed on the page (no console digging on a tablet) and `window.__PPG.selftest()` callable from Playwright in CI.
 
@@ -724,12 +727,13 @@ same in-page harness so they run on a tablet as well as in CI:
 | **T21** | A scripted match through the real state machine reaches `MatchOver`; both sides score; no non-finite bodies; no invariant violations | Multi-shot soak: state machine, reset, drift, leaks |
 | **T22** | Physics cost per rendered frame `< 4 ms` of the 16.7 ms budget, measured with the wall clock | 60 fps criterion (numeric proxy; the real number must come from the tablet) |
 | **T23** | Audio context + compressor bus wired; per-pair throttle holds; `voices ≤ maxVoices`; no throw while scheduling | The clack is priority #1 feedback and had never been exercised headlessly |
+| **T24** | First player varies from match to match; every new match starts 0–0 in `Kickoff` | PRD "random first player" — a fixed seed had quietly made it constant |
 
 ### 14.2 Traceability
 
 | PRD acceptance criterion | Design mechanism | Test |
 | --- | --- | --- |
-| Random first player, 0–0, banner | `GAME.newMatch`, `Kickoff` state | manual + T-suite setup |
+| Random first player, 0–0, banner | `GAME.newMatch` draws `startPlayer` from the run PRNG; `?seed=` pins it for reproducible runs | **T24** |
 | Only active player's stones respond; locked while moving | `INPUT` candidate filter + single `inputUnlocked` flag | manual |
 | Turn passes only after all bodies rest | `SIM.query().allAtRest` gate | T2/T3 assert rest reached |
 | Fully-crossed scores for opponent, own goals | region test + `concede()`, no branches | T1b-adjacent unit check |
@@ -765,6 +769,7 @@ Per PRD: FPS, per-body speeds, live sliders for `rollingDecel`, `linearDamping`,
 | Every sound threw | Silent in normal play (audio is never unlocked headlessly, so the path never ran) | `tone()` scheduled `stop()` on oscillator/buffer sources that were never `start()`ed → `InvalidStateError` on the first clack | T23, which unlocks audio and schedules real voices deliberately |
 | Pull distance meaningless | Dead zone no longer guaranteed a minimum pull; power jumped unpredictably | `metrics.sxPx(x)` / `metrics.syPx(y)` take one argument each, but `aimVector` passed `(x, y)` into **both**, so the anchor's Y used the body's **x** | T16/T17 |
 | Turn never passed on a miss | `turn 1->1` after a non-scoring shot | `Settling` did not alternate the shooter when no goal occurred | T12 |
+| "Random" first player was never random | every load started the same player | `SEED` defaulted to the constant `20261109`, so the run PRNG was identical per page load. Now: fresh seed per load, pinned only when `?seed=` asks for it | T24 |
 
 Also fixed while here: `AUDIO.setMaster()` now runs inside `unlock()`, so `hit()` can never connect to an undefined bus; a stray duplicated `</script></body></html>` tail in the file (which broke `?debug&selftest` loading); and a global `error`/`unhandledrejection` trap that surfaces page errors into the `?debug` panel instead of only the console.
 
@@ -829,8 +834,8 @@ Each has a default already coded in this design, so implementation is not blocke
 Total ≈ 3.5–4 days, with the physics risk retired first (M1) rather than last.
 
 **Status as built.** M1–M3 are complete and green: `./tools/check.sh 1000` passes the whole ladder —
-T1…T8 at 1,000 shots, T9…T23, and the offline audit (71.5 kB, 1,442 lines, one inline script block,
-zero network/asset references). Measured on desktop: worst max-power settle 1.92 s (limit 4 s),
+T1…T8 at 1,000 shots, T9…T23, and the offline audit (73.1 kB, 1,465 lines, one inline script block,
+zero network/asset references, 25 checks). Measured on desktop: worst max-power settle 1.92 s (limit 4 s),
 medium-shot mean 1.10 s (limit 3 s), striker residual 3.7% (limit 10%), pileup settle ≤ 1.75 s,
 determinism exact, zero invariant violations and zero stone-in-goal across 1,000 + 1,000 mouth-targeted
 shots, physics ≈ 0.004 ms/frame of the 16.7 ms budget. M4/M5 remain: the platform criteria are
