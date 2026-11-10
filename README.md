@@ -28,6 +28,8 @@ Requires only Node and a Chrome/Chromium binary.
 | `node tools/offline-check.mjs` | Still one file: no external script/link/image/URL/fetch/import |
 | `node tools/physics-test.mjs [n]` | Physics only, in Node, extracted from the shipped `index.html` |
 | `./tools/browser-test.sh [n]` | Headless Chrome: physics + pixels + rules + input + match flow |
+| `./tools/render-map.sh [cols] [w] [h]` | The canvas as a character map: `,` felt, `+` scoreboard, `B`/`O` stones, `#` puck |
+| `node tools/probe.mjs` | The quoted numbers: how far a shot rolls, when it rests, how hot it hits the far wall |
 
 The same self-tests are compiled into the game. On a real tablet open
 `index.html?debug&selftest` and tap **selftest** — that is the only way to get the frame-rate and

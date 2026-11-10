@@ -82,7 +82,9 @@ const CONFIG = {
     stoneR: 0.045, puckR: 0.035, stoneMass: 1.0, puckMass: 0.6,
     restitution: { stoneStone: 0.92, stonePuck: 0.92, wall: 0.75 },
     restitutionSpeedMin: 0.2,                           // below this: no bounce (kills micro-jitter)
-    maxLaunchSpeed: 3.0, rollingDecel: 0.9, linearDamping: 0.4,
+    // Tuned against T25: on an empty board a max-power stone must roll ~ONE field length.
+    // 3.0 H/s rolled 2.73 H = 171% of the table, so every full pull slammed the far wall.
+    maxLaunchSpeed: 2.15, rollingDecel: 0.9, linearDamping: 0.4,
     restThreshold: 0.01, settleConsecutive: 2, settleCap: 12.0, hardSpeedMax: 6.0,
     iterations: 4, posIterations: 5, slop: 0.0005, correction: 0.4,
     nudgeGap: 0.035, nudgeDuration: 0.15, scoreMargin: 0.01,
@@ -93,7 +95,9 @@ const CONFIG = {
     angleStepDeg: 0.05, powerStep: 0.004,               // determinism lattice
   },
   GAME: { winScore: 5, bannerMs: 1000, celebrationMs: 2000 },
-  RENDER: { marginPx: 8, particleCap: 60, dprMax: 3, colors: {
+  RENDER: { marginPx: 8, particleCap: 60, dprMax: 3,
+    hudBand: { frac: 0.10, min: 34, max: 72 },              // strip above the field, for the score
+    colors: {
     p1: '#3d8cff', p1dim: '#1d4f9c', p2: '#ff8a3d', p2dim: '#a4501c',
     felt: '#16473e', feltEdge: '#0f352e', line: '#2f6b5f', puck: '#f4f7f4', puckRing: '#1c2b26' } },
   AUDIO: { pairThrottleMs: 50, maxVoices: 8 },
@@ -644,7 +648,7 @@ function noiseVoice(ctx, buf, cutoff) {
 const RENDER = {
   canvas: document.getElementById('stage'),
   ctx: null, dpr: 1, scale: 1, cx: 0, cy: 0, W: 0, H: 0,
-  stat: null, sctx: null, sprites: {}, paths: {}, t: 0,
+  stat: null, sctx: null, sprites: {}, paths: {}, t: 0, band: 0, bandTop: 0, bandMid: 0,
   init() {
     this.ctx = this.canvas.getContext('2d');
     this.fit();
@@ -658,14 +662,25 @@ const RENDER = {
     const m = CONFIG.RENDER.marginPx + Math.max(
       (navigator.vibrate ? 0 : 0),
       safeInset());
+    // The scoreboard owns a strip across the top; the field is laid out in what is left,
+    // so the score is never painted over the felt and the play area shrinks by exactly the
+    // height of the scoreboard (asserted by T26).
+    const band = this.bandPx(H);
     const dw = GEOM.DRAW.maxX - GEOM.DRAW.minX, dh = GEOM.DRAW.maxY - GEOM.DRAW.minY;
-    const scale = Math.min((W - 2 * m) / dw, (H - 2 * m) / dh);
+    const availH = Math.max(48, H - 2 * m - band);
+    const scale = Math.min((W - 2 * m) / dw, availH / dh);
+    this.band = band; this.bandTop = m; this.bandMid = m + band / 2;
     this.W = W; this.H = H; this.dpr = dpr; this.scale = scale;
-    this.cx = W / 2; this.cy = H / 2;
+    this.cx = W / 2;
+    this.cy = m + band + availH / 2;                    // centred below the strip
     this.canvas.width = Math.round(W * dpr); this.canvas.height = Math.round(H * dpr);
     this.canvas.style.width = W + 'px'; this.canvas.style.height = H + 'px';
     this.bakeStatic(); this.bakeSprites();
     PLATFORM.rotateCheck();
+  },
+  bandPx(H) {
+    const b = CONFIG.RENDER.hudBand;
+    return Math.round(Math.max(b.min, Math.min(H * b.frac, b.max)));
   },
   // world -> css px
   X(x) { return this.cx + x * this.scale; },
@@ -839,23 +854,30 @@ const RENDER = {
     b.beginPath(); b.moveTo(bx, by); b.lineTo(INPUT.px, INPUT.py); b.stroke();
     b.restore();
   },
+  hudBox() {
+    const size = Math.max(16, Math.round(Math.min(this.band * 0.60, this.L(0.14))));
+    const w = size * 1.6, mid = this.bandMid;
+    return {
+      size, w, mid,
+      top: mid - size * 0.62, bottom: mid + size * 0.62,
+      left: this.cx - w * 1.1, right: this.cx + w * 1.1,
+    };
+  },
   hud() {
-    const c = this.ctx, C = CONFIG.RENDER.colors;
-    const y = Math.max(this.L(0.09), this.Y(P.halfH) + this.L(0.06));
-    const size = Math.round(Math.max(18, this.L(0.13)));
-    c.save(); c.textAlign = 'center'; c.font = 'bold ' + size + 'px system-ui, sans-serif';
+    const c = this.ctx, C = CONFIG.RENDER.colors, b = this.hudBox();
+    c.save(); c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.font = 'bold ' + b.size + 'px system-ui, sans-serif';
     const s1 = String(GAME.score[0]), s2 = String(GAME.score[1]);
-    const w = size * 1.6;
     c.fillStyle = 'rgba(0,0,0,.30)';
-    this.rr(c, this.cx - w * 1.1, y - size * 0.95, w * 2.2, size * 1.3, size * 0.3); c.fill();
-    c.fillStyle = C.p1; c.fillText(s1, this.cx - w * 0.55, y);
-    c.fillStyle = 'rgba(255,255,255,.65)'; c.fillText('–', this.cx, y);
-    c.fillStyle = C.p2; c.fillText(s2, this.cx + w * 0.55, y);
+    this.rr(c, b.left, b.top, b.right - b.left, b.bottom - b.top, b.size * 0.3); c.fill();
+    c.fillStyle = C.p1; c.fillText(s1, this.cx - b.w * 0.55, b.mid);
+    c.fillStyle = 'rgba(255,255,255,.65)'; c.fillText('\u2013', this.cx, b.mid);
+    c.fillStyle = C.p2; c.fillText(s2, this.cx + b.w * 0.55, b.mid);
     for (const n of [1, 2]) {
       const on = GAME.turn === n && (GAME.state === 'Aiming' || GAME.state === 'Kickoff');
       c.fillStyle = n === 1 ? C.p1 : C.p2;
       c.globalAlpha = on ? 1 : 0.35;
-      c.beginPath(); c.arc(this.cx + (n === 1 ? -w * 1.05 : w * 1.05), y - size * 0.3, size * 0.16, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(this.cx + (n === 1 ? -b.w * 1.05 : b.w * 1.05), b.mid, b.size * 0.16, 0, Math.PI * 2); c.fill();
     }
     c.restore();
   },
@@ -967,15 +989,57 @@ const DEBUG = {
     sl('linearDamping', () => P.linearDamping, (v) => P.linearDamping = v, 0, 1.5, 0.05);
     sl('wall e', () => R.wall, (v) => R.wall = v, 0, 1, 0.01);
     sl('body e', () => R.stonePuck, (v) => { R.stonePuck = R.stoneStone = v; }, 0, 1, 0.01);
-    sl('maxSpeed', () => P.maxLaunchSpeed, (v) => P.maxLaunchSpeed = v, 0.5, 6, 0.1);
+    sl('maxSpeed', () => P.maxLaunchSpeed, (v) => P.maxLaunchSpeed = v, 0.5, 4, 0.05);
     sl('puckMass', () => P.puckMass, (v) => P.puckMass = v, 0.2, 2, 0.05);
     d.insertAdjacentHTML('beforeend', '<pre id="dstat"></pre><pre id="dtest"></pre>');
     const b1 = document.createElement('button'); b1.textContent = 'selftest';
     b1.addEventListener('click', () => { document.getElementById('dtest').textContent = 'running…'; setTimeout(() => window.__PPG.selftest(), 30); });
+    const b3 = document.createElement('button'); b3.textContent = 'ascii map';
+    b3.addEventListener('click', () => DEBUG.dumpAscii());
+    d.appendChild(b3);
     const b2 = document.createElement('button'); b2.textContent = 'force settle';
     b2.addEventListener('click', () => { for (const b of GAME.sim.world.bodies) { b.vx = 0; b.vy = 0; b.resting = true; } });
     d.appendChild(b1); d.appendChild(b2);
     if (q.has('selftest')) setTimeout(() => window.__PPG.selftest(Number(q.get('n') || 200)), 200);
+    if (q.has('ascii')) setTimeout(() => DEBUG.dumpAscii(Number(q.get('cols') || 74)), 250);
+  },
+  // A canvas is opaque to a terminal. This renders the frame as a character grid so layout
+  // (scoreboard strip, letterbox, felt, bodies) can be read and diffed without a screenshot.
+  // Debug-only: it is never called unless the URL asked for it.
+  asciiMap(cols) {
+    const c = RENDER.canvas.getContext('2d');
+    const w = RENDER.canvas.width, h = RENDER.canvas.height;
+    if (!w || !h) return 'no canvas';
+    const img = c.getImageData(0, 0, w, h).data;
+    const n = Math.max(24, Math.min(110, cols || 74));
+    const rows = Math.max(8, Math.round(n * (h / w) * 0.52));
+    const cls = (r, g, b) => {
+      // Ordered, and deliberately thresholded against the *tinted* felt: the turn tint lays a
+      // 7-10% player-colour wash over half the board, which would otherwise read as "blue stone".
+      if (r > 185 && g > 185 && b > 185) return '#';                    // puck, white marks
+      if (b > r + 60 && b > g + 40) return 'B';                         // P1 stones
+      if (r > b + 60 && r > g + 40) return 'O';                         // P2 stones
+      if (g > 55 && g > r + 20) return ',';                             // felt (tinted or not)
+      if (r < 12 && g < 36) return '+';                                 // scoreboard pill
+      if (r > 45 && g > 75) return '-';                                 // halos, FX, bright edges
+      return '.';                                                      // letterbox / page background
+    };
+    const out = [];
+    for (let ry = 0; ry < rows; ry++) {
+      let row = '';
+      for (let rx = 0; rx < n; rx++) {
+        const x = Math.min(w - 1, Math.floor((rx + 0.5) * w / n));
+        const y = Math.min(h - 1, Math.floor((ry + 0.5) * h / rows));
+        const i = (y * w + x) * 4;
+        row += cls(img[i], img[i + 1], img[i + 2]);
+      }
+      out.push(row);
+    }
+    return out.join('\n');
+  },
+  dumpAscii(cols) {
+    const pre = document.getElementById('dtest');
+    if (pre) pre.textContent = this.asciiMap(cols);
   },
   tickStats(now) {
     if (!this.on) return;
@@ -1100,6 +1164,35 @@ function runSelfTests(n = 1000) {
     T('T3 medium<=3s', fails === 0, 'mean=' + (sum / 50).toFixed(2) + 's fails=' + fails);
   }
 
+  // T25: power calibration. A max-power shot on an empty board must roll about ONE table
+  // length, not 1.7 of them. Walls are parked far away so what is integrated is the drag
+  // curve on its own: that distance is exactly what a player feels at full pull.
+  {
+    const sim = fresh();
+    sim.reset();
+    for (let i = 0; i < sim.world.stones.length; i++) {
+      const o = sim.world.stones[i];
+      o.x = -0.5 - 0.15 * i; o.y = 1.5 + 0.15 * i;           // out of the lane
+    }
+    sim.world.puck.x = 0; sim.world.puck.y = 0.7;
+    const s = sim.world.stones[0];
+    s.x = -0.70; s.y = 0;
+    const saved = { halfW: CONFIG.PHYSICS.halfW, halfH: CONFIG.PHYSICS.halfH };
+    CONFIG.PHYSICS.halfW = 40; CONFIG.PHYSICS.halfH = 40;    // wall-free board
+    sim.fire(s, 0, CONFIG.PHYSICS.maxLaunchSpeed);
+    let d = 0, lx = s.x, ly = s.y, steps = 0;
+    while (steps++ < 40000 && Math.hypot(s.vx, s.vy) > CONFIG.PHYSICS.restThreshold) {
+      sim.step(CONFIG.PHYSICS.step);
+      d += Math.hypot(s.x - lx, s.y - ly); lx = s.x; ly = s.y;
+    }
+    CONFIG.PHYSICS.halfW = saved.halfW; CONFIG.PHYSICS.halfH = saved.halfH;
+    const tableLen = 2 * saved.halfW;
+    const pct = d / tableLen;
+    T('T25 maxShotRolls~1table', Math.abs(pct - 1) <= 0.07,
+      'v0=' + CONFIG.PHYSICS.maxLaunchSpeed + 'H/s travels ' + d.toFixed(3) + 'H = ' +
+      Math.round(pct * 100) + '% of the ' + tableLen.toFixed(2) + 'H table (target 100%)');
+  }
+
   // T4: head-on stone->stone nearly stops the striker (target ~0.04 of incoming speed)
   {
     const sim = fresh();
@@ -1122,7 +1215,7 @@ function runSelfTests(n = 1000) {
     for (let i = 0; i < 50; i++) {
       const sim = fresh();
       const s = sim.world.stones[0];
-      sim.fire(s, 0.7853, 2.4);
+      sim.fire(s, 0.7853, 0.8 * CONFIG.PHYSICS.maxLaunchSpeed);
       let t = 0; while (t < 15 && !sim.allAtRest()) { sim.step(); t += CONFIG.PHYSICS.step; }
       sig.push(sim.world.bodies.map((b) => b.x.toFixed(12) + ',' + b.y.toFixed(12)).join('|'));
     }
@@ -1317,6 +1410,28 @@ function renderChecks() {
     ' puckPx=' + (P.puckR * RENDER.scale).toFixed(1) +
     ' maxDragPx=' + (CONFIG.AIM.maxDragFraction * 2 * P.halfH * RENDER.scale).toFixed(0) +
     ' grabPx=' + (P.stoneR * RENDER.scale + Math.max(CONFIG.AIM.grabTolerancePx, CONFIG.AIM.grabToleranceRatio * P.stoneR * RENDER.scale)).toFixed(1));
+  // T26: the score lives in its own strip - never on top of the felt - and the field has
+  // really been shortened by that strip. Geometry + a pixel probe, not an eyeball.
+  {
+    const hb = RENDER.hudBox(), fieldTop = RENDER.Y(P.halfH);
+    const fieldH = 2 * P.halfH * RENDER.scale;
+    const at = (sx, sy) => {
+      const g = RENDER.canvas.getContext('2d').getImageData(Math.round(sx * RENDER.dpr), Math.round(sy * RENDER.dpr), 1, 1).data;
+      return [g[0], g[1], g[2]];
+    };
+    const strip = at(hb.left - 40, hb.mid);           // in the band, beside the pill
+    const pill = at(hb.left + 10, hb.bottom - 6);     // pill fill, clear of digits and dots
+    const felt = at(RENDER.cx, fieldTop + 6);         // just inside the top of the field
+    const inBand = hb.bottom <= RENDER.bandTop + RENDER.band + 0.5 && hb.top >= RENDER.bandTop - 0.5;
+    const noOverlap = hb.bottom <= fieldTop + 0.5;
+    const shortened = fieldH <= RENDER.H - 2 * RENDER.bandTop + 1;
+    const painted = pill[0] < strip[0] - 2 && pill[1] < strip[1] - 2 && pill[2] < strip[2] - 2;
+    const feltIsNotStrip = Math.abs(felt[1] - strip[1]) > 6;
+    T('T26 hudClearOfField', inBand && noOverlap && shortened && painted && feltIsNotStrip,
+      'band=' + RENDER.band + 'px hud[' + hb.top.toFixed(0) + '..' + hb.bottom.toFixed(0) +
+      '] fieldTop=' + fieldTop.toFixed(0) + ' fieldH=' + fieldH.toFixed(0) + '/' + RENDER.H +
+      'px stripPx=' + strip + ' pillPx=' + pill + ' feltTopPx=' + felt);
+  }
   return out;
 }
 
@@ -1330,7 +1445,7 @@ function gameChecks() {
   GAME.newMatch(); GAME.enter('Aiming');
   const t0 = GAME.turn;
   const mine = () => GAME.sim.world.stones.filter((s) => s.owner === GAME.turn);
-  GAME.fire(mine()[0], 0.4, 2.4);
+  GAME.fire(mine()[0], 0.4, 0.8 * CONFIG.PHYSICS.maxLaunchSpeed);
   const mid = GAME.state, locked = !GAME.inputUnlocked;
   const end = pump();
   T('T12 turnPassesOnlyAtRest', mid === 'Simulating' && locked && (end === 'Kickoff') && GAME.turn !== t0 && GAME.sim.allAtRest(),
@@ -1421,7 +1536,7 @@ function gameChecks() {
   GAME.newMatch();
   let shots = 0, bad = 0;
   const rnd = mulberry32(7);
-  while (GAME.state !== 'MatchOver' && shots < 80) {
+  while (GAME.state !== 'MatchOver' && shots < 140) {
     if (GAME.state !== 'Aiming') { GAME.update(1 / 60); continue; }
     const me = mine();
     if (!me.length) break;
@@ -1435,10 +1550,13 @@ function gameChecks() {
     const nl = Math.hypot(nx, ny) || 1;
     const tx = pk.x - (nx / nl) * (P.stoneR + P.puckR), ty = pk.y - (ny / nl) * (P.stoneR + P.puckR);
     const s = me.slice().sort((a, b) => Math.hypot(a.x - tx, a.y - ty) - Math.hypot(b.x - tx, b.y - ty))[0];
-    GAME.fire(s, Math.atan2(ty - s.y, tx - s.x) + (rnd() - 0.5) * 0.04, 2.4 + 0.6 * rnd());
+    GAME.fire(s, Math.atan2(ty - s.y, tx - s.x) + (rnd() - 0.5) * 0.04,
+              (0.90 + 0.10 * rnd()) * CONFIG.PHYSICS.maxLaunchSpeed);
     for (let i = 0; i < 1200 && (GAME.state === 'Simulating' || GAME.state === 'Settling'); i++) GAME.update(1 / 60);
     for (const b of GAME.sim.world.bodies) if (!isFinite(b.x) || !isFinite(b.y) || !isFinite(b.vx) || !isFinite(b.vy)) bad++;
   }
+  // a shot that wins on the 140th attempt still has to be pumped through the celebration
+  let fin = 0; while (GAME.state !== 'MatchOver' && fin++ < 3000) GAME.update(1 / 60);
   const over = GAME.state === 'MatchOver';
   const legal = GAME.score[0] === 5 || GAME.score[1] === 5;
   T('T21 fullMatch', over && legal && bad === 0 && GAME.sim.world.violations.length === 0 && shots >= 5,

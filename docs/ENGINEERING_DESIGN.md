@@ -1,7 +1,7 @@
 # Puck Puck Go — Engineering Design Document
 
 Nov 9, 2026 · responds to `Puck Puck Go PRD.md` (commit `8e4b995`)
-Status: implemented (v1 as specified) · verification ladder in §14, as-built status in §17 · M4/M5 device checks outstanding
+Status: implemented (v1 as specified, two playtest iterations in) · verification ladder §14, as-built status §17 · M4/M5 device checks outstanding
 
 ---
 
@@ -184,12 +184,14 @@ P1 defends x = −0.80, P2 defends x = +0.80
 **Fit**: the *drawable* extents include both goal pockets: x ∈ [−0.88, +0.88] → aspect **1.76 : 1**.
 
 ```
-scale = min((W − 2*margin) / 1.76, (H − 2*margin) / 1.0)
-origin = viewport center, letterboxed
+band   = clamp(H * 0.10, 34 px, 72 px)             // scoreboard strip, reserved not overlaid
+availH = H − 2*margin − band
+scale  = min((W − 2*margin) / 1.76, availH / 1.0)
+origin = x = viewport centre; y = centred in the region BELOW the strip; letterboxed
 margin = 8 px + env(safe-area-inset-left/right)   // notch, nav bar, rounded corners
 ```
 
-Fitting the pockets rather than clipping them means the goal is fully drawn, and the letterbox never hides gameplay. On iPad landscape (4:3) the letterbox lands top and bottom, so the score HUD goes in that band, not on the field.
+Fitting the pockets rather than clipping them means the goal is fully drawn, and the letterbox never hides gameplay. The score is **not** drawn on top of the felt: it owns a reserved strip across the top and the field is laid out in what is left, so the play area is the viewport minus the scoreboard on every panel. A strip is *reserved* rather than the letterbox being *relied on* because most landscape tablets are 16:9 or wider, where there is no spare vertical band to hide a score in — the first build put the digits on the felt for exactly that reason, and playtest called it. `T26` now pins both halves: the HUD box must end above the field's top edge, and `fieldH ≤ viewport − 2·margin − band`.
 
 Derived physical sizes (consequence for §8's touch targets, computed for two representative tablets):
 
@@ -581,7 +583,7 @@ const CONFIG = {
     stoneR: 0.045, puckR: 0.035, stoneMass: 1.0, puckMass: 0.6,
     restitution: { 'stone-stone': 0.92, 'stone-puck': 0.92, wall: 0.75 },
     restitutionSpeedMin: 0.2,                          // below: no bounce, stops jitter
-    maxLaunchSpeed: 3.0, rollingDecel: 0.9, linearDamping: 0.4,
+    maxLaunchSpeed: 2.15, rollingDecel: 0.9, linearDamping: 0.4, // retuned: one full pull = one table
     restThreshold: 0.01, settleConsecutive: 2,
     settleCap: 12.0, hardSpeedMax: 6.0,
     solverIterations: 4, slop: 0.0005, correctionFactor: 0.4,
@@ -593,12 +595,13 @@ const CONFIG = {
     angleStepDeg: 0.05, powerStep: 0.004,              // determinism lattice (D6)
   },
   GAME: { winScore: 5, bannerMs: 1000, celebrationMs: 2000, seeded: true },
-  RENDER: { marginPx: 8, particleCap: 60, dprMax: 3 },
+  RENDER: { marginPx: 8, particleCap: 60, dprMax: 3,
+            hudBand: { frac: 0.10, min: 34, max: 72 } },          // score strip above the field
   AUDIO:  { pairThrottleMs: 50, maxVoices: 8 },
 };
 ```
 
-The PRD's table maps 1:1 onto `PHYSICS`. `dprMax: 3` caps fill cost on very-high-DPR panels (a 2.7K tablet at dpr 3 would quadruple pixel work for no visible gain in a sunlit car).
+The PRD's table maps 1:1 onto `PHYSICS` — **with one deliberate deviation**: `maxLaunchSpeed` is 2.15 H/s, not 3.0. At 3.0 a max-power stone rolls 2.73 H = **171% of the table**, so every full pull ended in the far wall, and a full pull that cannot be stopped where you aimed it reads as uncontrollable. At 2.15 the same shot measures 1.602 H = **one table length** (§13.1). Nothing else moved: the drag model, masses and restitutions are the PRD's, and `T25` now gates the calibration (roll distance within ±7% of one table length), so no future tune can quietly undo it. The knob stays live under `?debug` for the car session. `dprMax: 3` caps fill cost on very-high-DPR panels (a 2.7K tablet at dpr 3 would quadruple pixel work for no visible gain in a sunlit car).
 
 Tuning policy: **tune `rollingDecel` first** — it dominates settle time and the "felt" character (§13.1 sensitivity); touch `linearDamping` only for top-end bleed; touch `restitution.wall` last, since it governs bank-shot liveliness and is where "ricochets feel right" actually lives. Never tune `restThreshold` to paper over a jitter bug — that hides solver defects, and §7.5's `restitutionSpeedMin` is the correct lever.
 
@@ -617,22 +620,35 @@ t(v0)  = (1/k) · ln( (a + k·v0) / (a + k·v_rest) )
 s(v0)  = (v0 − v_rest)/k − (a/k²) · ln( (a + k·v0) / (a + k·v_rest) )
 ```
 
-| Launch speed | v0 (H/s) | time to rest | path length |
-| --- | --- | --- | --- |
-| max (100%) | 3.00 | **2.11 s** | 2.73 H |
-| 67% | 2.00 | 1.58 s | 1.42 H |
-| medium (50%) | 1.50 | **1.27 s** | 0.88 H |
-| 33% | 1.00 | 0.91 s | 0.43 H |
+| Launch speed | v0 (H/s) | time to rest | path length | share of the 1.6 H table |
+| --- | --- | --- | --- | --- |
+| max (100%) | 2.15 | **1.67 s** | **1.60 H** | 100% |
+| 67% | 1.44 | 1.23 s | 0.82 H | 51% |
+| medium (50%) | 1.08 | 0.97 s | 0.49 H | 31% |
+| 33% | 0.71 | 0.68 s | 0.23 H | 14% |
+
+Both columns are closed form, and both are now measured: `tools/probe.mjs` integrates the shipped
+solver on a wall-free board and reproduces them to <0.5%. (Before the retune, the max row read
+2.11 s / 2.73 H = 171% of the table.)
 
 Against the PRD criteria:
-- **"max-power shot crosses the field and comes to rest within 4 s"** → 2.11 s unobstructed; field length is 1.6 H ⇒ it does cross. ✓ (2.73 H of path available.)
-- **"medium shot settles within 3 s"** → 1.27 s, 0.88 H. ✓ Comfortable margin.
+- **"max-power shot crosses the field and comes to rest within 4 s"** → 1.67 s unobstructed, and the path is 1.60 H: it crosses the table and no further. ✓ The criterion keeps a wide time margin (4 s against 1.67 s) *and* the distance now matches the intent of "a full pull".
+- **"medium shot settles within 3 s"** → 0.97 s, 0.49 H. ✓ Comfortable margin.
+- Side effect worth having: turns are quicker. Measured worst max-power settle across 1,000 random shots fell from 1.89 s to 1.62 s, and the empty-board worst from 1.51 s (was ~2.1 s predicted).
 
 ### 13.2 The PRD's "rebounds about once" claim, checked
 
-Solving x(v) = 1.6 H for a max shot from rest position: it reaches the far wall at **≈1.74 H/s** (58% of launch). Wall restitution 0.75 ⇒ returns at **≈1.31 H/s** ⇒ travels a further **0.69 H**, stopping ~0.7 H from the far wall. Total path ≈ 2.3 H, total time ≈ 1.9 s.
+Measured by `tools/probe.mjs` on the real board (clear lane, straight down it, max power):
 
-Verdict: **the PRD's constants are self-consistent** with "crosses the field and rebounds about once" — and note that a rebound *shortens* total time, so the 4 s criterion gains margin. Also worth knowing for aiming feel: a max shot that has crossed the table still hits the far wall at more than half speed, so cross-table shots are lively, not dying. And the 0.25 H → 2.7 H amplification (~11×) is why a modest finger travel is enough; raising `maxDragFraction` for comfort would make the game feel uncontrollable.
+| Shot starts | total path | total time | arrives at the far wall at |
+| --- | --- | --- | --- |
+| own back row x = −0.65 | 1.52 H | 1.52 s | 0.48 H/s — 22% of launch |
+| back line x = −0.35 | 1.40 H | 1.46 s | 0.81 H/s — 38% |
+| centre x = 0 | 1.26 H | 1.41 s | 1.10 H/s — 51% |
+
+Verdict: the acceptance wording — "crosses the field and comes to rest within 4 s" — still holds from every row, and there is still exactly **one** rebound. What the retune takes away is the *violence* at the far end: a max shot from your own back row now arrives at the far wall at a fifth of launch speed and barely comes back, where at 3.0 H/s it came back at half speed. In play terms, a full pull from your own half is now a "get the stone across the table" shot rather than a "ricochet off the far wall into the goal" shot. Shots that bank off the near and side walls — the ones a player actually aims at — are untouched, because restitution and drag did not move. Judged honestly, the PRD's constants were self-consistent with its flavour claim; the flavour claim lost to the playtest, because a shot that always ends in a far-wall crash is the more visible defect. `maxLaunchSpeed` remains a live slider and `T25` guards whichever value is chosen.
+
+Also unchanged in kind: 0.25 H of finger travel maps to 1.60 H of stone path (**~6×** amplification, was ~11×), which is why a modest pull is enough; raising `maxDragFraction` for comfort would make the game feel uncontrollable.
 
 ### 13.3 Collision transfers (1-D, e = 0.92) — the momentum criterion
 
@@ -648,7 +664,7 @@ v1' = (m1 − e·m2)/(m1+m2) · v      v2' = (1+e)·m1/(m1+m2) · v
 | any → wall (e = 0.75) | 0.75 v normal, 0.56 kinetic energy | — |
 
 - **"Head-on hit nearly stops the striker"** → a stone–stone head-on leaves the striker at 4% of speed. ✓ Strongly satisfied by the equal-mass choice; this is the criterion most likely to *under*-deliver if someone re-tunes masses, so this table is the thing to re-check first if playtest says "hits feel mushy".
-- **Puck flies off hits** → 1.2× the striker's speed, guaranteed by mass 0.6. ✓ This is also the speed bound that sizes the sub-step count: 1.2 × 3.0 = 3.6 H/s max, hence 3 sub-steps (§7.3), with `hardSpeedMax 6.0` as the guard.
+- **Puck flies off hits** → 1.2× the striker's speed, guaranteed by mass 0.6. ✓ This is also the speed bound that sizes the sub-step count: 1.2 × 2.15 = 2.58 H/s max, hence 3 sub-steps (A4 — the bound is set by *approach* speed, so the retune did not buy a sub-step), with `hardSpeedMax 6.0` as the guard.
 
 ### 13.4 Geometric feasibility checks
 
@@ -688,6 +704,7 @@ The PRD's hardest criteria are numeric, so the test lives in the artifact and ru
 | **T7** | Puck parked against each wall/mouth-post at rest | nudge moves it ≥ 1 puck radius clear without scoring | wall nudge |
 | **T8** | 60 random max-power shots into the full 11-body board | every settle ≤ `settleCap` (12 s); p50/p95/max reported | no stuck/forever-rolling board |
 | **T22** | 20,000 `step()` calls on the full board, wall clock | physics `< 4 ms` of the 16.7 ms frame budget | 60 fps (numeric gate) |
+| **T25** | One max-power shot integrated on a wall-free board (boundary temporarily widened), total path | path within **±7% of one table length** (measured 1.602 H / 1.60 H) | power calibration — the "a full pull means something" criterion nobody wrote down |
 
 The frame-rate criterion is **not** measured by a headless run: a virtual-time budget freezes the clock, and T22 says so out loud rather than reporting a fake 0.00 ms. On the tablet, `?debug` prints live fps and the worst-case sub-step count next to the field during exactly the pileup that matters.
 
@@ -700,7 +717,9 @@ The frame-rate criterion is **not** measured by a headless run: a virtual-time b
 | `tools/physics-test.mjs` | Extracts the DOM-free sections (`CONFIG`…`SIM`, `PRNG`, `runSelfTests`) straight out of `index.html` and runs them in Node. Catches physics regressions in <1 s, no browser. Extraction by section markers means the tested code is *the shipped bytes*, not a copy. |
 | `tools/browser-test.sh` + `tools/parse-dom.py` | Headless Chrome loads `index.html?debug&selftest&n=N` under a virtual-time budget, dumps the DOM, prints the PASS/FAIL table and any page error, exits non-zero on failure. Exercises render + rules + input too. |
 | `tools/offline-check.mjs` | Static audit of the PRD's single-file/offline contract: no `src=`, `<link>`, absolute URL, `fetch`/`XHR`/`WebSocket`, ES `import`, `require`, media/asset reference. |
-| `tools/check.sh` | All three, one command, non-zero on any failure. |
+| `tools/check.sh` | Runs the whole ladder, one command, non-zero on any failure. |
+| `tools/render-map.sh` + `tools/parse-ascii.py` | Dumps the canvas as a character grid (`DEBUG.asciiMap`: `,` felt, `+` scoreboard pill, `B`/`O` stones, `#` puck, `.` letterbox). Layout faults are legible in a terminal and diffable in a diff, with no screenshot to eyeball. |
+| `tools/probe.mjs` | Measures the §13 numbers (stopping distance, time to rest, far-wall impact speed) by integrating the shipped solver, so the analysis quotes measurements instead of algebra. |
 
 T1…T8 are therefore gated on every commit on desktop; the *numeric* platform criteria (T22 frame budget, wake lock, fullscreen, glare) still need the real tablet, which is why the harness is compiled into the artifact and reachable as `window.__PPG.selftest(n)` from the device browser.
 
@@ -728,6 +747,8 @@ same in-page harness so they run on a tablet as well as in CI:
 | **T22** | Physics cost per rendered frame `< 4 ms` of the 16.7 ms budget, measured with the wall clock | 60 fps criterion (numeric proxy; the real number must come from the tablet) |
 | **T23** | Audio context + compressor bus wired; per-pair throttle holds; `voices ≤ maxVoices`; no throw while scheduling | The clack is priority #1 feedback and had never been exercised headlessly |
 | **T24** | First player varies from match to match; every new match starts 0–0 in `Kickoff` | PRD "random first player" — a fixed seed had quietly made it constant |
+| **T25** | A max-power shot on a wall-free board rolls within ±7% of **one** table length | Power calibration: playtest said a full pull threw the stone ~150% of the table. Pins the retune |
+| **T26** | Scoreboard box entirely inside its reserved strip, ending above the field's top edge; strip pixel is bare background while the pill pixel is painted; `fieldH ≤ viewport − 2·margin − band` | "The score must not overlap the field" — geometry *and* a pixel probe, so it cannot regress into an eyeball judgement |
 
 ### 14.2 Traceability
 
@@ -758,7 +779,7 @@ same in-page harness so they run on a tablet as well as in CI:
 
 ### 14.3 Debug overlay (`?debug`)
 
-Per PRD: FPS, per-body speeds, live sliders for `rollingDecel`, `linearDamping`, `restitution.*`, `maxLaunchSpeed`. Added because this design needs them: sub-step count, live swept-test hit count (is the CCD bound holding?), per-step contact count, violation log with body id/position/velocity, "force settle" and "reset layout" buttons, SDF-distance readout for the puck, and a nudge log. Sliders write into `CONFIG.PHYSICS` live, so tuning happens on-device in the car — the only environment the feel criteria can be judged in.
+Per PRD: FPS, per-body speeds, live sliders for `rollingDecel`, `linearDamping`, `restitution.*`, `maxLaunchSpeed`. Added because this design needs them: sub-step count, live swept-test hit count (is the CCD bound holding?), per-step contact count, violation log with body id/position/velocity, "force settle" and "reset layout" buttons, SDF-distance readout for the puck, and a nudge log. Sliders write into `CONFIG.PHYSICS` live, so tuning happens on-device in the car — the only environment the feel criteria can be judged in. `?debug&ascii` (and an *ascii map* button) prints the current frame as a character grid inside the panel: felt, letterbox, scoreboard strip, bodies, in text. It exists because layout faults — a scoreboard on the felt, a body drawn a radius off its physics position — are obvious in 76 characters wide and invisible in a 1,280-pixel screenshot nobody looks at closely.
 
 ### 14.3b Defects the harness found (evidence it is pulling its weight)
 
@@ -770,6 +791,10 @@ Per PRD: FPS, per-body speeds, live sliders for `rollingDecel`, `linearDamping`,
 | Pull distance meaningless | Dead zone no longer guaranteed a minimum pull; power jumped unpredictably | `metrics.sxPx(x)` / `metrics.syPx(y)` take one argument each, but `aimVector` passed `(x, y)` into **both**, so the anchor's Y used the body's **x** | T16/T17 |
 | Turn never passed on a miss | `turn 1->1` after a non-scoring shot | `Settling` did not alternate the shooter when no goal occurred | T12 |
 | "Random" first player was never random | every load started the same player | `SEED` defaulted to the constant `20261109`, so the run PRNG was identical per page load. Now: fresh seed per load, pinned only when `?seed=` asks for it | T24 |
+| Scoreboard painted on the field | score digits sat on the felt's top edge, crowding the play area | The HUD was drawn at a fixed offset *from the field's top edge*, which only hides in a letterbox that wide landscape panels do not have. `RENDER.fit()` now reserves the band and lays the field out below it | **playtest**, then T26 |
+| Full power overshot the table | a max pull sent a stone ~1.7 table lengths; shots always died on the far wall | `maxLaunchSpeed 3.0` was a constant that was never tied to a measurable criterion. Measured roll at 3.0 = 2.73 H; at 2.15 = 1.602 H | **playtest**, then T25 |
+
+Note the last two rows: they were found by *playing* it, which is the only reason T25 and T26 exist. A harness that tests only what the PRD enumerated will keep shipping whatever the PRD did not enumerate.
 
 Also fixed while here: `AUDIO.setMaster()` now runs inside `unlock()`, so `hit()` can never connect to an undefined bus; a stray duplicated `</script></body></html>` tail in the file (which broke `?debug&selftest` loading); and a global `error`/`unhandledrejection` trap that surfaces page errors into the `?debug` panel instead of only the console.
 
@@ -833,16 +858,17 @@ Each has a default already coded in this design, so implementation is not blocke
 
 Total ≈ 3.5–4 days, with the physics risk retired first (M1) rather than last.
 
-**Status as built.** M1–M3 are complete and green: `./tools/check.sh 1000` passes the whole ladder —
-T1…T8 at 1,000 shots, T9…T23, and the offline audit (73.1 kB, 1,465 lines, one inline script block,
-zero network/asset references, 25 checks). Measured on desktop: worst max-power settle 1.92 s (limit 4 s),
-medium-shot mean 1.10 s (limit 3 s), striker residual 3.7% (limit 10%), pileup settle ≤ 1.75 s,
-determinism exact, zero invariant violations and zero stone-in-goal across 1,000 + 1,000 mouth-targeted
-shots, physics ≈ 0.004 ms/frame of the 16.7 ms budget. M4/M5 remain: the platform criteria are
+**Status as built.** M1–M3 are complete and green, through two playtest iterations:
+`./tools/check.sh 1000` passes the whole ladder — T1…T8 at 1,000 shots, T9…T26, and the offline audit
+(79.5 kB, 1,583 lines, one inline script block, zero network/asset references, 27 checks). Measured on
+desktop at the retuned power: worst max-power settle 1.62 s (limit 4 s), empty-board worst 1.51 s,
+medium-shot mean 0.88 s (limit 3 s), striker residual 3.3% (limit 10%), pileup settle ≤ 1.52 s,
+max shot rolls 1.602 H = one table (target 100%), determinism exact, zero invariant violations and zero
+stone-in-goal across 1,000 + 1,000 mouth-targeted shots, physics ≈ 0.004 ms/frame of the 16.7 ms budget. M4/M5 remain: the platform criteria are
 device-only (fullscreen/landscape/wake lock on the actual tablet, glare legibility, thermal behaviour
 while charging, and the T22 number measured on the tablet rather than under a virtual-time budget).
 M5's tuning pass is also where the feel questions in §16 get answered; the `?debug` live sliders
-(rollingDecel, linearDamping, wall e, body e, maxSpeed, puckMass) exist for exactly that.
+(rollingDecel, linearDamping, wall e, body e, maxSpeed, puckMass) exist for exactly that. `maxLaunchSpeed` now has a target to tune against rather than a vibe: `T25` prints the measured roll as a percentage of table length.
 
 ---
 
@@ -850,11 +876,11 @@ M5's tuning pass is also where the feel questions in §16 get answered; the `?de
 
 **A1. Drag, closed form.** `dv/dt = −a − kv` ⇒ `v(t) = (v0 + a/k)e^{−kt} − a/k`; position integrates to `Δx = (v0 − v(t))/k − (a/k)t`. Time to reach `v_r`: `t = (1/k)ln((a+kv0)/(a+kv_r))`. Distance to rest: substitute. With `a=0.9, k=0.4`: `t(v0) = 2.5 ln((0.9+0.4v0)/0.904)`, `s(v0) = (v0−0.01)/0.4 − 5.625 ln((0.9+0.4v0)/0.904)`.
 
-**A2. Distance-to-speed (used in §13.2).** `x(v) = (v0−v)/k − (a/k²) ln((a+kv0)/(a+kv))`; solving `x(·)=1.60` at `v0=3.0` gives `v ≈ 1.74 H/s`.
+**A2. Distance-to-speed (used in §13.2).** `x(v) = (v0−v)/k − (a/k²) ln((a+kv0)/(a+kv))`. At the retuned `v0 = 2.15` the distance to rest is 1.60 H, so a stone fired from the far enough row arrives at the far wall at `x = 1.45 H` with `v ≈ 0.48 H/s` (22% of launch) — confirmed by measurement, not just algebra, in §13.2.
 
-**A3. 1-D collision.** Momentum + `e = (v2′−v1′)/(v1−v2)` gives `v1′ = (m1−e m2)v/(m1+m2)`, `v2′ = (1+e)m1 v/(m1+m2)` (target initially at rest). Max post-collision speed in this system: stone(1.0) at 3.0 into puck(0.6) → `1.20 × 3.0 = 3.6 H/s`.
+**A3. 1-D collision.** Momentum + `e = (v2′−v1′)/(v1−v2)` gives `v1′ = (m1−e m2)v/(m1+m2)`, `v2′ = (1+e)m1 v/(m1+m2)` (target initially at rest). Max post-collision speed in this system: stone(1.0) at 2.15 into puck(0.6) → `1.20 × 2.15 = 2.58 H/s`.
 
-**A4. Sub-step bound.** Worst pair approach speed `≈ 2 v_max = 7.2 H/s`; `n = ceil(7.2 × (1/120) / 0.02) = 3`. Smallest solid feature 0.08 H (pocket back wall); smallest body radius 0.035 H. Per-sub-step travel ≤ 0.02 H < 0.035 ⇒ discrete overlap tests cannot miss a collision. Cap 8 sub-steps ⇒ ≤ 0.06 H/step, still below every feature.
+**A4. Sub-step bound.** Worst pair approach speed `≈ 2 v_max = 5.16 H/s` (2.58 H/s from A3); `n = ceil(5.16 × (1/120) / 0.02) = 3`. Smallest solid feature 0.08 H (pocket back wall); smallest body radius 0.035 H. Per-sub-step travel ≤ 0.02 H < 0.035 ⇒ discrete overlap tests cannot miss a collision. Cap 8 sub-steps ⇒ ≤ 0.06 H/step, still below every feature.
 
 **A5. Screen fit.** Drawable x-extent 1.76 H (field 1.6 + two pockets of 0.08) against y-extent 1.0 ⇒ aspect 1.76. `scale = min((W−2m)/1.76, (H−2m)/1.0)`.
 
