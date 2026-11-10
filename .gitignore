@@ -1,0 +1,3 @@
+ide-marshal-*.ts
+*.png
+__pycache__/
