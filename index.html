@@ -8,7 +8,10 @@
 <meta name="theme-color" content="#123c34">
 <style>
   *, *::before, *::after { box-sizing: border-box; }
-  :root { --inset-l: env(safe-area-inset-left, 0px); --inset-r: env(safe-area-inset-right, 0px); }
+  :root {
+    --inset-l: env(safe-area-inset-left, 0px); --inset-r: env(safe-area-inset-right, 0px);
+    --inset-t: env(safe-area-inset-top, 0px);   --inset-b: env(safe-area-inset-bottom, 0px);
+  }
   html, body {
     margin: 0; padding: 0; height: 100%; width: 100%;
     overflow: hidden; overscroll-behavior: none;
@@ -49,7 +52,7 @@
 <canvas id="stage"></canvas>
 
 <div class="overlay" id="rotate">
-  <div><h1>Rotate to landscape</h1><p>Puck Puck Go is played side by side, in landscape.</p></div>
+  <div><h1 id="orientTitle">Too small to play</h1><p id="orientMsg">Turn the tablet, or make the window bigger.</p></div>
 </div>
 
 <div class="overlay" id="winner">
@@ -96,7 +99,10 @@ const CONFIG = {
   },
   GAME: { winScore: 5, bannerMs: 1000, celebrationMs: 2000 },
   RENDER: { marginPx: 8, particleCap: 60, dprMax: 3,
-    hudBand: { frac: 0.10, min: 34, max: 72 },              // strip above the field, for the score
+    hudBand: { frac: 0.10, min: 34, max: 72 },              // score strip, along whichever axis has slack
+    layout: 'auto',                 // which way the table's LONG axis points: 'auto' | 'wide' | 'tall'
+    minStonePx: 18,                 // a stone's DIAMETER below this is not playable, in any layout
+    flipMargin: 1.06,               // 'tall' must draw a board 6% bigger to win: no flapping on resize
     colors: {
     p1: '#3d8cff', p1dim: '#1d4f9c', p2: '#ff8a3d', p2dim: '#a4501c',
     felt: '#16473e', feltEdge: '#0f352e', line: '#2f6b5f', puck: '#f4f7f4', puckRing: '#1c2b26' } },
@@ -104,6 +110,13 @@ const CONFIG = {
   LAYOUT: { p1: [[-0.65, -0.15], [-0.65, 0.15], [-0.50, 0], [-0.35, -0.15], [-0.35, 0.15]], puck: [0, 0] },
 };
 const P = CONFIG.PHYSICS;
+
+/* ?layout=wide|tall|auto has to be read BEFORE the first fit(), which is why it lives here and
+   not in DEBUG: it is also the escape hatch for a seat we cannot sense. A portrait centre
+   display in a car has both players alongside it, and for that seat the right answer is the
+   smaller 'wide' board, not the bigger 'tall' one. Override costs one constant. */
+const LAYOUT_PARAM = (new URLSearchParams(location.search).get('layout') || '').trim();
+if (LAYOUT_PARAM === 'wide' || LAYOUT_PARAM === 'tall' || LAYOUT_PARAM === 'auto') CONFIG.RENDER.layout = LAYOUT_PARAM;
 
 /* ============================== SECTION: GEOMETRY ============================== */
 /* The boundary is a signed-distance field, evaluated per body class:
@@ -554,9 +567,12 @@ const INPUT = {
     const b = this.body; if (!b) return null;
     const st = RENDER.metrics;
     const dxw = b.x - this.sx, dyw = b.y - this.sy;
-    // sxPx takes an x, syPx takes a y (one argument each). Mixing these up silently
-    // corrupts every pull distance, and the dead zone stops being a phantom-touch floor.
-    const dpx = Math.hypot(this.px - st.sxPx(b.x), this.py - st.syPx(b.y));
+    // The pull is measured in SCREEN px against where the stone is actually DRAWN, because that
+    // is the only distance a finger has; at() is the same mapping the renderer drew with, so a
+    // layout change cannot desync "how far I dragged" from "what I was looking at" and the dead
+    // zone stays a real floor under the phantom touches this game has to survive.
+    const drawn = st.at(b.x, b.y);
+    const dpx = Math.hypot(this.px - drawn.x, this.py - drawn.y);
     const dead = st.stonePx + CONFIG.AIM.deadZonePx;
     const maxDrag = CONFIG.AIM.maxDragFraction * st.fieldHpx;
     const len = Math.hypot(dxw, dyw);
@@ -647,8 +663,9 @@ function noiseVoice(ctx, buf, cutoff) {
 /* ============================== SECTION: RENDER ============================== */
 const RENDER = {
   canvas: document.getElementById('stage'),
-  ctx: null, dpr: 1, scale: 1, cx: 0, cy: 0, W: 0, H: 0,
-  stat: null, sctx: null, sprites: {}, paths: {}, t: 0, band: 0, bandTop: 0, bandMid: 0,
+  ctx: null, dpr: 1, scale: 1, cx: 0, cy: 0, W: 0, H: 0, mx: 0, my: 0,
+  stat: null, sctx: null, sprites: {}, paths: {}, t: 0,
+  rot: 0, band: 0, bandTop: 0, bandLeft: 0, bandMid: 0,
   init() {
     this.ctx = this.canvas.getContext('2d');
     this.fit();
@@ -659,44 +676,80 @@ const RENDER = {
   fit() {
     const W = window.innerWidth, H = window.innerHeight;
     const dpr = Math.min(window.devicePixelRatio || 1, CONFIG.RENDER.dprMax);
-    const m = CONFIG.RENDER.marginPx + Math.max(
-      (navigator.vibrate ? 0 : 0),
-      safeInset());
-    // The scoreboard owns a strip across the top; the field is laid out in what is left,
-    // so the score is never painted over the felt and the play area shrinks by exactly the
-    // height of the scoreboard (asserted by T26).
-    const band = this.bandPx(H);
+    const ins = safeInsets();
+    const mx = CONFIG.RENDER.marginPx + ins.x, my = CONFIG.RENDER.marginPx + ins.y;
     const dw = GEOM.DRAW.maxX - GEOM.DRAW.minX, dh = GEOM.DRAW.maxY - GEOM.DRAW.minY;
-    const availH = Math.max(48, H - 2 * m - band);
-    const scale = Math.min((W - 2 * m) / dw, availH / dh);
-    this.band = band; this.bandTop = m; this.bandMid = m + band / 2;
-    this.W = W; this.H = H; this.dpr = dpr; this.scale = scale;
-    this.cx = W / 2;
-    this.cy = m + band + availH / 2;                    // centred below the strip
+    /* The same table can be laid down two ways: long axis ACROSS the screen ('wide', players at
+       the left and right edges) or ALONG it ('tall', players at the bottom and top edges). Both
+       are the identical game seen from a different seat, and the physics is never told which one
+       was chosen - so the only honest tie-breaker available to a machine that cannot see the
+       players is which way draws the BIGGER board. Bigger board = bigger stones = aimable in
+       sunlight, which is the reason the PRD asked for landscape in the first place.
+       The scoreboard keeps a reserved strip either way - across the top when wide, down the left
+       when tall - so it is never painted on the felt in either layout (layoutProbe, T26/T27). */
+    const way = (rot) => {
+      const band = this.bandPx(Math.min(W, H));
+      const availW = Math.max(48, W - 2 * mx - (rot ? band : 0));
+      const availH = Math.max(48, H - 2 * my - (rot ? 0 : band));
+      return { rot, band, availW, availH, scale: Math.min(availW / (rot ? dh : dw), availH / (rot ? dw : dh)) };
+    };
+    const wide = way(0), tall = way(1), policy = CONFIG.RENDER.layout;
+    let pick = wide;
+    if (policy === 'tall') pick = tall;
+    else if (policy === 'wide') pick = wide;
+    else if (tall.scale > wide.scale * CONFIG.RENDER.flipMargin) pick = tall;
+    this.rot = pick.rot; this.band = pick.band; this.mx = mx; this.my = my;
+    this.bandTop = my; this.bandLeft = mx;
+    this.bandMid = pick.rot ? H / 2 : my + pick.band / 2;     // centre ALONG the strip's own axis
+    this.W = W; this.H = H; this.dpr = dpr; this.scale = pick.scale;
+    this.cx = pick.rot ? mx + pick.band + pick.availW / 2 : W / 2;
+    this.cy = pick.rot ? H / 2 : my + pick.band + pick.availH / 2;
     this.canvas.width = Math.round(W * dpr); this.canvas.height = Math.round(H * dpr);
     this.canvas.style.width = W + 'px'; this.canvas.style.height = H + 'px';
     this.bakeStatic(); this.bakeSprites();
     PLATFORM.rotateCheck();
   },
-  bandPx(H) {
+  bandPx(shortSide) {
     const b = CONFIG.RENDER.hudBand;
-    return Math.round(Math.max(b.min, Math.min(H * b.frac, b.max)));
+    return Math.round(Math.max(b.min, Math.min(shortSide * b.frac, b.max)));
   },
-  // world -> css px
-  X(x) { return this.cx + x * this.scale; },
-  Y(y) { return this.cy - y * this.scale; },
+  /* One world point in, one SCREEN css px out, in BOTH layouts. A 90-degree layout cannot be
+     carried by the old one-dimensional X(x)/Y(y) pair: when the table stands up, a screen x
+     depends on world y. So every draw call, every pixel probe and the entire input path go
+     through pt()/toWorld()/dir(), and there is exactly one frame in this file - the one thing
+     that keeps "you grab the stone you can see" true in either layout. */
+  pt(x, y) {
+    const ax = x * this.scale, ay = -y * this.scale;
+    return this.rot ? { x: this.cx + ay, y: this.cy - ax } : { x: this.cx + ax, y: this.cy + ay };
+  },
+  // world -> screen, exact inverse of pt(): same rotation, opposite sign, no approximation
+  toWorld(px, py) {
+    return this.rot ? { x: (this.cy - py) / this.scale, y: (this.cx - px) / this.scale }
+                    : { x: (px - this.cx) / this.scale, y: (this.cy - py) / this.scale };
+  },
+  // world direction -> screen direction (unit-preserving, no translation): the aim arrow speaks this
+  dir(dx, dy) { return this.rot ? { x: -dy, y: -dx } : { x: dx, y: -dy }; },
   L(v) { return v * this.scale; },
-  toWorld(px, py) { return { x: (px - this.cx) / this.scale, y: (this.cy - py) / this.scale }; },
+  // world-aligned rect -> its screen box (a quarter turn keeps an axis-aligned rect axis-aligned)
+  rect(x0, y0, x1, y1) {
+    const a = this.pt(x0, y0), b = this.pt(x1, y1);
+    return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
+  },
+  fieldRect() { return this.rect(GEOM.DRAW.minX, GEOM.DRAW.minY, GEOM.DRAW.maxX, GEOM.DRAW.maxY); },
+  bandRect() {
+    return this.rot ? { x: this.bandLeft, y: this.my, w: this.band, h: this.H - 2 * this.my }
+                    : { x: this.mx, y: this.bandTop, w: this.W - 2 * this.mx, h: this.band };
+  },
   get metrics() {
     const self = this;
-    return { sxPx: (x) => self.X(x), syPx: (y) => self.Y(y), fieldHpx: 2 * P.halfH * this.scale, stonePx: P.stoneR * this.scale };
+    return { at: (x, y) => self.pt(x, y), fieldHpx: 2 * P.halfH * this.scale, stonePx: P.stoneR * this.scale };
   },
   pickStone(px, py, player) {
     const r = P.stoneR * this.scale + Math.max(CONFIG.AIM.grabTolerancePx, CONFIG.AIM.grabToleranceRatio * P.stoneR * this.scale);
     let best = null, bd = Infinity;
     for (const s of GAME.sim.world.stones) {
       if (s.owner !== player) continue;
-      const dx = this.X(s.x) - px, dy = this.Y(s.y) - py, d = Math.hypot(dx, dy);
+      const p = this.pt(s.x, s.y), dx = p.x - px, dy = p.y - py, d = Math.hypot(dx, dy);
       if (d <= r && d < bd) { best = { body: s, d }; bd = d; }
     }
     return best;
@@ -710,8 +763,8 @@ const RENDER = {
     c.lineTo(x, y + r); c.quadraticCurveTo(x, y, x + r, y); c.closePath();
   },
   fieldOutline(c) {                                   // rounded rect in css px
-    const x = this.X(-P.halfW), y = this.Y(P.halfH);
-    this.rr(c, x, y, this.L(2 * P.halfW), this.L(2 * P.halfH), this.L(P.cornerR));
+    const r = this.rect(-P.halfW, -P.halfH, P.halfW, P.halfH);
+    this.rr(c, r.x, r.y, r.w, r.h, this.L(P.cornerR));
   },
   bakeStatic() {
     const c0 = this.stat || (this.stat = document.createElement('canvas'));
@@ -722,24 +775,28 @@ const RENDER = {
     const C = CONFIG.RENDER.colors;
     // pockets first (behind felt edge), then felt, so the mouth reads as an opening
     for (const side of [-1, 1]) {
-      const x0 = this.X(side === 1 ? P.halfW : -(P.halfW + P.goalDepth));
+      const g = this.rect(side === 1 ? P.halfW : -(P.halfW + P.goalDepth), -P.mouthHalf,
+                          side === 1 ? P.halfW + P.goalDepth : -P.halfW, P.mouthHalf);
       c.fillStyle = C.feltEdge;
-      c.fillRect(x0, this.Y(P.mouthHalf), this.L(P.goalDepth), this.L(2 * P.mouthHalf));
+      c.fillRect(g.x, g.y, g.w, g.h);
       c.strokeStyle = C.line; c.lineWidth = 1.5;
-      c.strokeRect(x0, this.Y(P.mouthHalf), this.L(P.goalDepth), this.L(2 * P.mouthHalf));
+      c.strokeRect(g.x, g.y, g.w, g.h);
     }
     this.fieldOutline(c); c.fillStyle = C.felt; c.fill();
     c.save(); this.fieldOutline(c); c.clip();
     c.strokeStyle = 'rgba(255,255,255,.07)'; c.lineWidth = Math.max(2, this.L(0.02));
-    c.beginPath(); c.arc(this.X(0), this.Y(0), this.L(0.16), 0, Math.PI * 2); c.stroke();
+    const mid = this.pt(0, 0);
+    c.beginPath(); c.arc(mid.x, mid.y, this.L(0.16), 0, Math.PI * 2); c.stroke();
     c.strokeStyle = 'rgba(255,255,255,.10)'; c.lineWidth = Math.max(1, this.L(0.008));
-    c.beginPath(); c.moveTo(this.X(0), this.Y(P.halfH)); c.lineTo(this.X(0), this.Y(-P.halfH)); c.stroke();
+    const ln0 = this.pt(0, P.halfH), ln1 = this.pt(0, -P.halfH);
+    c.beginPath(); c.moveTo(ln0.x, ln0.y); c.lineTo(ln1.x, ln1.y); c.stroke();
     c.restore();
     this.fieldOutline(c); c.strokeStyle = 'rgba(230,246,238,.30)'; c.lineWidth = 2; c.stroke();
     // thin goal line: a stone resting against the (invisible) mouth wall must read correctly
     for (const side of [-1, 1]) {
       c.strokeStyle = 'rgba(255,255,255,.22)'; c.lineWidth = 1; c.setLineDash([4, 4]);
-      c.beginPath(); c.moveTo(this.X(side * P.halfW), this.Y(P.mouthHalf)); c.lineTo(this.X(side * P.halfW), this.Y(-P.mouthHalf)); c.stroke();
+      const q0 = this.pt(side * P.halfW, P.mouthHalf), q1 = this.pt(side * P.halfW, -P.mouthHalf);
+      c.beginPath(); c.moveTo(q0.x, q0.y); c.lineTo(q1.x, q1.y); c.stroke();
       c.setLineDash([]);
     }
   },
@@ -779,15 +836,16 @@ const RENDER = {
     const s = this.sprites[key]; if (!s) return;
     const c = this.ctx; c.save(); if (alpha !== undefined) c.globalAlpha = alpha;
     const w = s.cv.width / this.dpr * (scaleK || 1);
-    c.drawImage(s.cv, this.X(x) - w / 2, this.Y(y) - w / 2, w, w); c.restore();
+    const p = this.pt(x, y);
+    c.drawImage(s.cv, p.x - w / 2, p.y - w / 2, w, w); c.restore();
   },
   halfTint(player, alpha) {
     const C = CONFIG.RENDER.colors, c = this.ctx;
     c.save(); this.fieldOutline(c); c.clip();
     c.fillStyle = C[player === 1 ? 'p1' : 'p2'];
     c.globalAlpha = alpha;
-    const x0 = player === 1 ? this.X(-P.halfW) : this.X(0);
-    c.fillRect(x0, this.Y(P.halfH), this.L(P.halfW), this.L(2 * P.halfH));
+    const hf = this.rect(player === 1 ? -P.halfW : 0, -P.halfH, player === 1 ? 0 : P.halfW, P.halfH);
+    c.fillRect(hf.x, hf.y, hf.w, hf.h);
     c.restore();
   },
   frame(now) {
@@ -813,7 +871,8 @@ const RENDER = {
     for (const q of GAME.particles) {
       c.globalAlpha = Math.max(0, q.life);
       c.fillStyle = C[q.scorer === 1 ? 'p1' : 'p2'] || C.p1;
-      c.beginPath(); c.arc(this.X(q.x), this.Y(q.y), Math.max(1.5, this.L(0.012)), 0, Math.PI * 2); c.fill();
+      const pq = this.pt(q.x, q.y);
+      c.beginPath(); c.arc(pq.x, pq.y, Math.max(1.5, this.L(0.012)), 0, Math.PI * 2); c.fill();
     }
     c.globalAlpha = 1;
 
@@ -831,10 +890,11 @@ const RENDER = {
     }
   },
   arrow(aim) {
-    const b = this.ctx, s = this.metrics, c = GAME.sim.world;
-    const bx = this.X(this._aimBody.x), by = this.Y(this._aimBody.y);
+    const b = this.ctx, s = this.metrics;
+    const o = this.pt(this._aimBody.x, this._aimBody.y), d = this.dir(aim.dir.x, aim.dir.y);
+    const bx = o.x, by = o.y;                               // everything below is in screen px
     const len = s.stonePx * (1.3 + 3.4 * aim.power);
-    const ex = bx + aim.dir.x * len, ey = by - aim.dir.y * len;
+    const ex = bx + d.x * len, ey = by + d.y * len;
     const neutral = aim.cancelled;
     const hue = neutral ? 0 : 135 - 135 * aim.power;
     b.save();
@@ -842,7 +902,7 @@ const RENDER = {
     b.lineWidth = Math.max(3, s.stonePx * 0.22);
     b.strokeStyle = neutral ? 'rgba(255,255,255,.35)' : 'hsl(' + hue + ' 80% 55%)';
     b.globalAlpha = neutral ? 0.55 : 0.95;
-    b.beginPath(); b.moveTo(bx + aim.dir.x * s.stonePx * 1.05, by - aim.dir.y * s.stonePx * 1.05); b.lineTo(ex, ey); b.stroke();
+    b.beginPath(); b.moveTo(bx + d.x * s.stonePx * 1.05, by + d.y * s.stonePx * 1.05); b.lineTo(ex, ey); b.stroke();
     const ah = s.stonePx * 0.55, a = Math.atan2(ey - by, ex - bx);
     b.beginPath();
     b.moveTo(ex, ey);
@@ -854,30 +914,45 @@ const RENDER = {
     b.beginPath(); b.moveTo(bx, by); b.lineTo(INPUT.px, INPUT.py); b.stroke();
     b.restore();
   },
+  // The HUD is one box, dots included, and it must fit inside the reserved strip in EITHER
+  // layout - so the box is computed here once and the renderer and the layout probe both read
+  // the same numbers. Each score sits nearest the end that player defends, which is what lets
+  // the pill stay upright and make sense however the table has been laid down.
   hudBox() {
     const size = Math.max(16, Math.round(Math.min(this.band * 0.60, this.L(0.14))));
-    const w = size * 1.6, mid = this.bandMid;
+    const arm = size * 0.88, half = size * 0.62, pad = size * 0.34, dotR = size * 0.16;
+    if (this.rot) {
+      const x = this.bandLeft + this.band / 2, mid = this.bandMid;   // vertical pill in the gutter
+      return {
+        size, along: 'y', rot: 1,
+        x: x - half - dotR, y: mid - arm - half - pad - dotR, w: 2 * (half + dotR), h: 2 * (arm + half + pad + dotR),
+        p1: { x, y: mid + arm }, p2: { x, y: mid - arm }, dash: { x, y: mid },
+        dot1: { x, y: mid + arm + half + pad }, dot2: { x, y: mid - arm - half - pad },
+      };
+    }
+    const y = this.bandMid, mid = this.cx;                            // horizontal pill across the top
     return {
-      size, w, mid,
-      top: mid - size * 0.62, bottom: mid + size * 0.62,
-      left: this.cx - w * 1.1, right: this.cx + w * 1.1,
+      size, along: 'x', rot: 0,
+      x: mid - arm - half - pad - dotR, y: y - half - dotR, w: 2 * (arm + half + pad + dotR), h: 2 * (half + dotR),
+      p1: { x: mid - arm, y }, p2: { x: mid + arm, y }, dash: { x: mid, y },
+      dot1: { x: mid - arm - half - pad, y }, dot2: { x: mid + arm + half + pad, y },
     };
   },
   hud() {
     const c = this.ctx, C = CONFIG.RENDER.colors, b = this.hudBox();
     c.save(); c.textAlign = 'center'; c.textBaseline = 'middle';
     c.font = 'bold ' + b.size + 'px system-ui, sans-serif';
-    const s1 = String(GAME.score[0]), s2 = String(GAME.score[1]);
     c.fillStyle = 'rgba(0,0,0,.30)';
-    this.rr(c, b.left, b.top, b.right - b.left, b.bottom - b.top, b.size * 0.3); c.fill();
-    c.fillStyle = C.p1; c.fillText(s1, this.cx - b.w * 0.55, b.mid);
-    c.fillStyle = 'rgba(255,255,255,.65)'; c.fillText('\u2013', this.cx, b.mid);
-    c.fillStyle = C.p2; c.fillText(s2, this.cx + b.w * 0.55, b.mid);
-    for (const n of [1, 2]) {
+    this.rr(c, b.x, b.y, b.w, b.h, b.size * 0.3); c.fill();
+    c.fillStyle = C.p1; c.fillText(String(GAME.score[0]), b.p1.x, b.p1.y);
+    c.fillStyle = 'rgba(255,255,255,.65)'; c.fillText('\u2013', b.dash.x, b.dash.y);
+    c.fillStyle = C.p2; c.fillText(String(GAME.score[1]), b.p2.x, b.p2.y);
+    for (const n of [1, 2]) {                     // whose turn: a dot beside that player's own digit
       const on = GAME.turn === n && (GAME.state === 'Aiming' || GAME.state === 'Kickoff');
+      const d = n === 1 ? b.dot1 : b.dot2;
       c.fillStyle = n === 1 ? C.p1 : C.p2;
       c.globalAlpha = on ? 1 : 0.35;
-      c.beginPath(); c.arc(this.cx + (n === 1 ? -b.w * 1.05 : b.w * 1.05), b.mid, b.size * 0.16, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(d.x, d.y, b.size * 0.16, 0, Math.PI * 2); c.fill();
     }
     c.restore();
   },
@@ -927,19 +1002,40 @@ const PLATFORM = {
     if (this.gestureDone) return;
     this.gestureDone = true;
     const el = document.documentElement;
-    if (el.requestFullscreen) el.requestFullscreen({ navigationUI: 'hide' }).then(() => this.lockLandscape()).catch(() => {});
+    if (el.requestFullscreen) el.requestFullscreen({ navigationUI: 'hide' }).then(() => this.lockLayout()).catch(() => {});
     this.requestWake();
   },
-  lockLandscape() {
+  lockLayout() {
+    // 'auto' deliberately does NOT lock the screen. The layout follows the window, so the tablet
+    // is free to be held or mounted either way and the board just gets as big as it can. Only an
+    // explicit ?layout=wide|tall asks the device to turn, and only where that is even allowed
+    // (Chrome/Android in fullscreen; iPadOS refuses - design doc 11.4).
+    const want = { wide: 'landscape', tall: 'portrait' }[CONFIG.RENDER.layout];
     const o = screen.orientation;
-    if (o && o.lock) o.lock('landscape').catch(() => {});
+    if (want && o && o.lock) o.lock(want).catch(() => {});
   },
   async requestWake() {
     try { if (navigator.wakeLock && navigator.wakeLock.request && !document.hidden) this.wake = await navigator.wakeLock.request('screen'); } catch (_) {}
   },
+  /* This used to be "portrait => unplayable, rotate". That was a legibility rule wearing an
+     orientation-shaped proxy: what actually has to be true is that a stone is wide enough to aim
+     at and to grab - generously so, because the panel is read in sunlight. The layout now takes
+     whichever direction draws the bigger board, so portrait is no longer a reason to refuse.
+     The overlay is back only for the case that really is unplayable: a viewport too small to
+     produce a legible board in EITHER direction. */
   rotateCheck() {
-    const portrait = window.innerHeight > window.innerWidth * 1.02;
-    document.getElementById('rotate').classList.toggle('on', portrait);
+    const got = 2 * P.stoneR * RENDER.scale, need = CONFIG.RENDER.minStonePx;
+    this.smallPx = got;
+    this.tooSmall = got < need;
+    const el = document.getElementById('rotate');
+    el.classList.toggle('on', this.tooSmall);
+    if (this.tooSmall) {
+      document.getElementById('orientTitle').textContent = 'Too small to play';
+      document.getElementById('orientMsg').textContent =
+        'Stones are ' + got.toFixed(0) + ' px wide here; the game needs at least ' + need +
+        ' px. Turn the tablet, or make the window bigger.';
+    }
+    return this.tooSmall;
   },
   winner() {
     const w = GAME.score[0] > GAME.score[1] ? 1 : 2, C = CONFIG.RENDER.colors;
@@ -951,10 +1047,15 @@ const PLATFORM = {
   },
   hideWinner() { document.getElementById('winner').classList.remove('on'); },
 };
-function safeInset() {
+/* Insets are PER AXIS, because a notch lives on one edge and which edge that is depends on
+   which way the panel is turned. 'wide' pays for left/right, 'tall' for top/bottom - and now
+   that portrait is a legal layout, a top notch is reachable for the first time. A single max()
+   over all four insets would shrink the board on every panel to pay for an inset it does not
+   have, which is exactly how a legibility fix costs you a legibility win. */
+function safeInsets() {
   const s = getComputedStyle(document.documentElement);
   const v = (k) => parseFloat(s.getPropertyValue(k)) || 0;
-  return Math.max(v('--inset-l'), v('--inset-r'));
+  return { x: Math.max(v('--inset-l'), v('--inset-r')), y: Math.max(v('--inset-t'), v('--inset-b')) };
 }
 
 /* ============================== SECTION: DEBUG ============================== */
@@ -997,6 +1098,9 @@ const DEBUG = {
     const b3 = document.createElement('button'); b3.textContent = 'ascii map';
     b3.addEventListener('click', () => DEBUG.dumpAscii());
     d.appendChild(b3);
+    const b4 = document.createElement('button'); b4.textContent = 'flip layout';
+    b4.addEventListener('click', () => { CONFIG.RENDER.layout = RENDER.rot ? 'wide' : 'tall'; RENDER.fit(); });
+    d.appendChild(b4);
     const b2 = document.createElement('button'); b2.textContent = 'force settle';
     b2.addEventListener('click', () => { for (const b of GAME.sim.world.bodies) { b.vx = 0; b.vy = 0; b.resting = true; } });
     d.appendChild(b1); d.appendChild(b2);
@@ -1059,10 +1163,13 @@ const DEBUG = {
 
 /* ============================== SECTION: BOOT ============================== */
 const BOOT = {
-  last: 0,
+  last: 0, firstFit: null,
   init() {
     window.addEventListener('error', (e) => DEBUG.report('ERR ' + (e.message || e.error || e)));
     RENDER.init();
+    // recorded for T31: the layout override has to be in place BEFORE this first fit(), and
+    // that ordering is invisible until someone loads ?layout= and gets the other layout
+    this.firstFit = { layout: CONFIG.RENDER.layout, rot: RENDER.rot };
     PLATFORM.init();
     INPUT.attach(RENDER.canvas);
     DEBUG.init();
@@ -1329,12 +1436,192 @@ function runSelfTests(n = 1000) {
 
   if (typeof RENDER !== "undefined" && RENDER.canvas && RENDER.canvas.width) { for (const l of renderChecks()) out.push(l); }
   if (typeof RENDER !== "undefined" && RENDER.canvas && RENDER.canvas.width) { for (const l of gameChecks()) out.push(l); }
+  if (typeof RENDER !== "undefined" && RENDER.canvas && RENDER.canvas.width) { for (const l of layoutChecks()) out.push(l); }
 
   const txt = out.join('\n');
   console.log('\n' + txt);
   const pre = document.getElementById('dtest');
   if (pre) pre.textContent = txt;
   window.__PPG.selftestResult = out;
+  return out;
+}
+
+/* The layout probe, run once per orientation. Does the scoreboard really stay in its own strip,
+   clear of the felt, and has the board really given up that much of the viewport? Geometry plus
+   real painted pixels - checking one orientation only would have caught nothing, since the
+   scoreboard bug this guards was only ever visible in the other one. */
+function layoutProbe() {
+  const hb = RENDER.hudBox(), band = RENDER.bandRect(), fr = RENDER.fieldRect(), rot = !!RENDER.rot;
+  const cx2 = RENDER.canvas.getContext('2d'), d = RENDER.dpr;
+  const at = (sx, sy) => {
+    const g = cx2.getImageData(Math.round(sx * d), Math.round(sy * d), 1, 1).data;
+    return [g[0], g[1], g[2]];
+  };
+  const inBand = hb.x >= band.x - 0.5 && hb.y >= band.y - 0.5 &&
+                 hb.x + hb.w <= band.x + band.w + 0.5 && hb.y + hb.h <= band.y + band.h + 0.5;
+  const clearOfField = hb.x + hb.w <= fr.x + 0.5 || hb.x >= fr.x + fr.w - 0.5 ||
+                       hb.y + hb.h <= fr.y + 0.5 || hb.y >= fr.y + fr.h - 0.5;
+  const along = rot ? 'w' : 'h', viewport = rot ? RENDER.W : RENDER.H;
+  // the strip eats the axis it lies along, so the margins that shrink it are the ones on
+  // THAT axis: left/right for a vertical strip, top/bottom for a horizontal one
+  const cross = rot ? RENDER.mx : RENDER.my;
+  const shortened = fr[along] <= viewport - 2 * cross - RENDER.band + 1;
+  // sample the pill's fill in the gap between a score digit and the turn dot - the one spot
+  // that is provably clear of both glyphs in either layout (digits end at 1.23 size from the
+  // dash, dots start at 1.68), so this cannot land on a number and report the HUD unpainted
+  const ux = hb.p2.x - hb.p1.x, uy = hb.p2.y - hb.p1.y, ul = Math.hypot(ux, uy) || 1;
+  const pillAt = { x: hb.dash.x + (ux / ul) * hb.size * 1.45, y: hb.dash.y + (uy / ul) * hb.size * 1.45 };
+  const stripAt = rot ? { x: band.x + band.w / 2, y: band.y + 8 } : { x: band.x + 8, y: band.y + band.h / 2 };
+  const feltAt = rot ? { x: fr.x + 6, y: fr.y + fr.h / 2 } : { x: fr.x + fr.w / 2, y: fr.y + 6 };
+  const pill = at(pillAt.x, pillAt.y), strip = at(stripAt.x, stripAt.y), felt = at(feltAt.x, feltAt.y);
+  const painted = pill[0] < strip[0] - 2 && pill[1] < strip[1] - 2 && pill[2] < strip[2] - 2;
+  const feltIsNotStrip = Math.abs(felt[1] - strip[1]) > 6;
+  const fitsInViewport = fr.x >= RENDER.mx - 0.5 && fr.y >= RENDER.my - 0.5 &&
+                         fr.x + fr.w <= RENDER.W - RENDER.mx + 0.5 && fr.y + fr.h <= RENDER.H - RENDER.my + 0.5;
+  return {
+    ok: inBand && clearOfField && shortened && painted && feltIsNotStrip && fitsInViewport,
+    why: 'hud[' + hb.x.toFixed(0) + ',' + hb.y.toFixed(0) + ' ' + hb.w.toFixed(0) + 'x' + hb.h.toFixed(0) +
+         '] band[' + band.x.toFixed(0) + ',' + band.y.toFixed(0) + ' ' + band.w.toFixed(0) + 'x' + band.h.toFixed(0) +
+         '] field[' + fr.x.toFixed(0) + ',' + fr.y.toFixed(0) + ' ' + fr.w.toFixed(0) + 'x' + fr.h.toFixed(0) + ']' +
+         ' inBand=' + inBand + ' clear=' + clearOfField + ' shortened=' + shortened +
+         ' painted=' + painted + ' felt!=' + 'strip=' + feltIsNotStrip + ' inViewport=' + fitsInViewport +
+         ' stripPx=' + strip + ' pillPx=' + pill + ' edgePx=' + felt,
+  };
+}
+
+/* Layout is a second coordinate system, so it gets what the physics got: measured, not eyeballed.
+   window.innerWidth/Height are read-only, so they are redefined for the probe and put back after. */
+function layoutChecks() {
+  const out = []; const T = (id, ok, msg) => out.push((ok ? 'PASS ' : 'FAIL ') + id + '  ' + msg);
+  // T31: ?layout= has to be in place before the FIRST fit(). It used to be read in DEBUG.init,
+  // which runs after RENDER.init, so the override only landed on the next resize: a portrait
+  // screen that explicitly asked for 'wide' got 'tall' on load and nothing complained.
+  {
+    const ff = BOOT.firstFit || {};
+    const wantRot = { wide: 0, tall: 1 }[ff.layout];
+    T('T31 layoutParamAppliesAtLoad', wantRot === undefined || ff.rot === wantRot,
+      'param=' + (ff.layout || '(none)') + ' rotAtFirstFit=' + ff.rot +
+      ' search=' + JSON.stringify(location.search) + ' firstFitRecorded=' + !!BOOT.firstFit);
+  }
+  const real = { w: window.innerWidth, h: window.innerHeight };
+  const view = (w, h) => {
+    Object.defineProperty(window, 'innerWidth', { value: w, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: h, configurable: true });
+  };
+  const settle = () => { GAME.newMatch(); RENDER.frame(performance.now()); };
+  const lay = (which) => { CONFIG.RENDER.layout = which; RENDER.fit(); settle(); };
+  const PE = (id, x, y) => ({ pointerId: id, pointerType: 'touch', clientX: x, clientY: y, button: 0, cancelable: true });
+  const restore = () => {
+    Object.defineProperty(window, 'innerWidth', { value: real.w, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: real.h, configurable: true });
+    CONFIG.RENDER.layout = 'auto'; RENDER.fit(); settle();
+  };
+
+  // T27: turning the same tablet must cost nothing. A portrait window lays the table along its
+  // long axis, and the board comes out the SAME size as in landscape - because the layout is
+  // chosen by the room available, not by the shape the vendor happened to call 'landscape'.
+  view(768, 1024); lay('auto');
+  const tall = { rot: RENDER.rot, scale: RENDER.scale, probe: layoutProbe(), stone: 2 * P.stoneR * RENDER.scale };
+  view(1024, 768); lay('auto');
+  const wide = { rot: RENDER.rot, scale: RENDER.scale, probe: layoutProbe() };
+  const sameBoard = Math.abs(tall.scale - wide.scale) / wide.scale < 0.01;
+  T('T27 layoutFollowsWindow', tall.rot === 1 && wide.rot === 0 && sameBoard && tall.probe.ok && wide.probe.ok,
+    'portrait rot=' + tall.rot + ' scale=' + tall.scale.toFixed(1) + ' stone=' + tall.stone.toFixed(1) +
+    'px | landscape rot=' + wide.rot + ' scale=' + wide.scale.toFixed(1) +
+    ' | sameSize=' + sameBoard + ' | tall: ' + tall.probe.why + ' | wide: ' + wide.probe.why);
+
+  // T28: a layout is a display choice, not a game rule. pt() and toWorld() must be exact
+  // inverses in both directions (that is what "grab the stone you can see" means), and the same
+  // shot must produce bit-identical physics whichever way the table is standing.
+  const samples = [[0, 0], [P.halfW, P.mouthHalf], [-0.65, 0.15], [P.halfW + P.goalDepth, 0], [-0.5, -0.4]];
+  let worst = 0;
+  const trace = () => {
+    GAME.newMatch();
+    const s = GAME.sim.world.stones[0];
+    GAME.fire(s, 0.7, 0.8 * P.maxLaunchSpeed);
+    for (let i = 0; i < 240; i++) GAME.update(1 / 60);
+    return GAME.sim.world.bodies.map((b) => b.x.toFixed(9) + ',' + b.y.toFixed(9)).join(';');
+  };
+  for (const which of ['wide', 'tall']) {
+    lay(which);
+    for (const [x, y] of samples) {
+      const p = RENDER.pt(x, y), w = RENDER.toWorld(p.x, p.y), dd = RENDER.dir(1, 0);
+      worst = Math.max(worst, Math.abs(w.x - x), Math.abs(w.y - y));
+      if (Math.abs(Math.hypot(dd.x, dd.y) - 1) > 1e-12) worst = 1e9;      // directions stay unit length
+    }
+  }
+  lay('wide'); const tWide = trace();
+  lay('tall'); const tTall = trace();
+  T('T28 layoutIsDisplayOnly', worst < 1e-9 && tWide === tTall,
+    'roundTripErr=' + worst.toExponential(1) + ' traceIdentical=' + (tWide === tTall));
+
+  // T29: the aim path is where a rotation would break the game. Pull DOWN-screen in the tall
+  // layout: that is world -x, so the stone must fly world +x - and on screen, UP the display,
+  // into the far goal. A sign error here makes the game unplayable and no screenshot shows why.
+  lay('tall');
+  GAME.enter('Aiming');
+  const st = GAME.sim.world.stones.filter((s) => s.owner === GAME.turn)[0];
+  const mt = RENDER.metrics, dead = mt.stonePx + CONFIG.AIM.deadZonePx;
+  const maxDrag = CONFIG.AIM.maxDragFraction * mt.fieldHpx;
+  const drag = Math.round(dead + 0.5 * (maxDrag - dead));
+  const p0 = RENDER.pt(st.x, st.y);
+  INPUT.onDown(PE(201, p0.x, p0.y));
+  INPUT.onDown(PE(901, p0.x + 40, p0.y + 40));                 // a stray finger alongside the pull
+  INPUT.onMove(PE(201, p0.x, p0.y + drag));
+  const a = INPUT.current();
+  const screenDown = a && Math.abs(RENDER.dir(a.dir.x, a.dir.y).y) > 0.99;
+  INPUT.onUp(PE(201, p0.x, p0.y + drag));
+  const fliesRight = a && a.dir.x > 0.99 && Math.abs(a.dir.y) < 0.01;
+  const upTheScreen = RENDER.dir(a.dir.x, a.dir.y).y < -0.99;
+  const moving = st.vx > 1e-9;
+  const vx0 = st.vx;                                   // captured at launch, not after settling
+  for (let i = 0; i < 240 && (GAME.state === 'Simulating' || GAME.state === 'Settling'); i++) GAME.update(1 / 60);
+  T('T29 aimSurvivesTallLayout', fliesRight && upTheScreen && moving && screenDown,
+    'pull=down-screen(' + drag + 'px) dir=' + (a && a.dir.x.toFixed(3)) + ',' + (a && a.dir.y.toFixed(3)) +
+    ' screenDir=' + RENDER.dir(a.dir.x, a.dir.y).x.toFixed(2) + ',' + RENDER.dir(a.dir.x, a.dir.y).y.toFixed(2) +
+    ' launched=' + moving + ' vxAtLaunch=' + vx0.toFixed(3));
+
+  // T30: the overlay is now a legibility gate, not an orientation gate.
+  view(1024, 768); lay('auto');
+  const roomy = !PLATFORM.tooSmall && !document.getElementById('rotate').classList.contains('on');
+  const roomyPx = PLATFORM.smallPx;
+  view(320, 300); lay('auto');
+  const tiny = PLATFORM.tooSmall && document.getElementById('rotate').classList.contains('on');
+  const tinyPx = PLATFORM.smallPx, tinyRot = RENDER.rot;
+  restore();
+  T('T30 legibilityGate', roomy && tiny,
+    '1024x768 stone=' + roomyPx.toFixed(1) + 'px blocked=' + !roomy +
+    ' | 320x300 stone=' + tinyPx.toFixed(1) + 'px rot=' + tinyRot +
+    ' blocked=' + tiny + ' floor=' + CONFIG.RENDER.minStonePx + 'px');
+  // T32: safe-area insets are PER AXIS. A notch sits on one edge, and which edge that is
+  // depends on which way the panel is turned - so a top inset may cost vertical room and must
+  // cost no horizontal room at all. The tempting one-liner, max() over all four insets, shrinks
+  // the board on every device to pay for an inset that device does not have, which quietly
+  // gives back the legibility that 'tall' exists to buy.
+  {
+    const m = CONFIG.RENDER.marginPx, el = document.documentElement;
+    const probe = (prop) => {
+      el.style.setProperty(prop, '44px');
+      RENDER.fit();
+      const out = { mx: RENDER.mx, my: RENDER.my, band: RENDER.bandRect(), fr: RENDER.fieldRect() };
+      el.style.removeProperty(prop);
+      return out;
+    };
+    view(768, 1024); lay('tall');
+    const tTop = probe('--inset-t'), tLeft = probe('--inset-l');
+    view(1024, 768); lay('wide');
+    const wTop = probe('--inset-t'), wLeft = probe('--inset-l');
+    restore();
+    const perAxis = tTop.mx === m && tTop.my === m + 44 && tLeft.my === m && tLeft.mx === m + 44 &&
+                    wTop.mx === m && wTop.my === m + 44 && wLeft.my === m && wLeft.mx === m + 44;
+    // nothing - scoreboard strip or felt - may be drawn inside the region the notch owns
+    const clear = tTop.band.y >= m + 44 - 0.5 && tTop.fr.y >= m + 44 - 0.5 &&
+                  tLeft.band.x >= m + 44 - 0.5 && tLeft.fr.x >= m + 44 - 0.5;
+    T('T32 safeInsetsPerAxis', perAxis && clear,
+      'tall: top44 -> mx=' + tTop.mx + ' my=' + tTop.my + ' left44 -> mx=' + tLeft.mx + ' my=' + tLeft.my +
+      ' | wide: top44 -> mx=' + wTop.mx + ' my=' + wTop.my + ' left44 -> mx=' + wLeft.mx + ' my=' + wLeft.my +
+      ' | notchClear=' + clear);
+  }
   return out;
 }
 
@@ -1350,7 +1637,7 @@ function renderChecks() {
     if (X < 0 || Y < 0 || X >= c.width || Y >= c.height) return null;
     const g = ctx.getImageData(X, Y, 1, 1).data; return [g[0], g[1], g[2]];
   };
-  const px = (wx, wy) => grab(Math.round(RENDER.X(wx) * d), Math.round(RENDER.Y(wy) * d));
+  const px = (wx, wy) => { const p = RENDER.pt(wx, wy); return grab(Math.round(p.x * d), Math.round(p.y * d)); };
   const sp = (sx, sy) => grab(Math.round(sx * d), Math.round(sy * d));
   const bright = (a) => a && a[0] > 190 && a[1] > 190 && a[2] > 190;
   const blue = (a) => a && a[2] > a[0] + 40;
@@ -1370,11 +1657,12 @@ function renderChecks() {
   const blitProbe = px(0.6, -0.4);
   const diag = ' sprites=' + Object.keys(RENDER.sprites).map((k) => k + ':' + RENDER.sprites[k].cv.width + 'x' + RENDER.sprites[k].cv.height).join(',') +
     ' puckXY=' + GAME.sim.world.puck.x + ',' + GAME.sim.world.puck.y +
-    ' screen=' + Math.round(RENDER.X(GAME.sim.world.puck.x)) + ',' + Math.round(RENDER.Y(GAME.sim.world.puck.y)) +
+    ' screen=' + (() => { const q = RENDER.pt(GAME.sim.world.puck.x, GAME.sim.world.puck.y); return Math.round(q.x) + ',' + Math.round(q.y); })() +
     ' dpr=' + d + ' canvas=' + c.width + 'x' + c.height + ' spriteCenterPx=' + spritePx + ' blitProbe=' + blitProbe;
   // pipeline probe: if a hand-drawn white square at the same spot reads back white, the
   // sampling/mapping is fine and the sprite blit itself is the failure.
-  ctx.save(); ctx.fillStyle = '#ffffff'; ctx.fillRect(Math.round(RENDER.X(0) * d) - 2, Math.round(RENDER.Y(0) * d) - 2, 5, 5); ctx.restore();
+  const wp = RENDER.pt(0, 0);
+  ctx.save(); ctx.fillStyle = '#ffffff'; ctx.fillRect(Math.round(wp.x * d) - 2, Math.round(wp.y * d) - 2, 5, 5); ctx.restore();
   const probe = px(0, 0);
   T('T9 canvasContent', bright(puck) && blue(s1) && orange(s2) && greenish(felt) && felt[1] > felt[0] + 20 && greenish(pocket) &&
       bright(probe) && bright(blitProbe) && spritePx[3] > 0,
@@ -1390,11 +1678,22 @@ function renderChecks() {
   // fatal in a grab-what-you-see tabletop game. Measure the drawn disc, don't trust the bake.
   const bg = px(0.15, -0.30);
   const d2 = (a, b) => (a && b) ? Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) : 1e9;
+  /* Which WORLD axis a screen sweep runs along depends on the layout, and the field markings
+     (centre line, centre circle) are world-aligned: sweep the wrong way in 'tall' and you read
+     the centre line as if it were the puck. So walk outward from the centre on BOTH axes, stop
+     at the first non-body pixel (a separate marking can't stretch the run), and keep the
+     NARROWER axis. A one-radius sprite offset still shows up as mid != 0 on both. */
   const measure = (wx, wy, rPx, isOn) => {
-    const cx = RENDER.X(wx), cyp = RENDER.Y(wy), span = Math.ceil(rPx + 6);
-    let lo = null, hi = null;
-    for (let i = -span; i <= span; i++) { if (isOn(sp(cx + i, cyp))) { if (lo === null) lo = i; hi = i; } }
-    return lo === null ? null : { mid: (lo + hi) / 2, width: hi - lo + 1 };
+    const cc = RENDER.pt(wx, wy), span = Math.ceil(rPx + 6);
+    let best = null;
+    for (const ax of [[1, 0], [0, 1]]) {
+      let lo = 0, hi = 0;
+      while (lo > -span && isOn(sp(cc.x + ax[0] * (lo - 1), cc.y + ax[1] * (lo - 1)))) lo--;
+      while (hi < span && isOn(sp(cc.x + ax[0] * (hi + 1), cc.y + ax[1] * (hi + 1)))) hi++;
+      const m = { mid: (lo + hi) / 2, width: hi - lo + 1, axis: ax[0] ? 'x' : 'y' };
+      if (!best || m.width < best.width) best = m;
+    }
+    return best;
   };
   const rPuckPx = P.puckR * RENDER.scale, rStonePx = P.stoneR * RENDER.scale;
   // the puck's rim carries a dark ring, so classify by "differs from felt" and use a low
@@ -1405,33 +1704,19 @@ function renderChecks() {
   T('T19 spriteConcentric', concentric(mPuck, rPuckPx) && concentric(mStone, rStonePx),
     'puck mid=' + (mPuck && mPuck.mid) + ' w=' + (mPuck && mPuck.width) + '/' + (2 * rPuckPx).toFixed(1) +
     ' stone mid=' + (mStone && mStone.mid) + ' w=' + (mStone && mStone.width) + '/' + (2 * rStonePx).toFixed(1));
-  const fits = RENDER.X(GEOM.DRAW.maxX) <= RENDER.W && RENDER.Y(GEOM.DRAW.minY) <= RENDER.H && RENDER.scale > 0;
-  T('T11 aspectFit', fits, 'scale=' + RENDER.scale.toFixed(1) + ' stonePx=' + (P.stoneR * RENDER.scale).toFixed(1) +
+  const fr11 = RENDER.fieldRect();
+  const fits = RENDER.scale > 0 && fr11.x >= RENDER.mx - 0.5 && fr11.y >= RENDER.my - 0.5 &&
+               fr11.x + fr11.w <= RENDER.W - RENDER.mx + 0.5 && fr11.y + fr11.h <= RENDER.H - RENDER.my + 0.5;
+  T('T11 aspectFit', fits, 'layout=' + (RENDER.rot ? 'tall' : 'wide') + ' scale=' + RENDER.scale.toFixed(1) +
+    ' stonePx=' + (P.stoneR * RENDER.scale).toFixed(1) +
     ' puckPx=' + (P.puckR * RENDER.scale).toFixed(1) +
     ' maxDragPx=' + (CONFIG.AIM.maxDragFraction * 2 * P.halfH * RENDER.scale).toFixed(0) +
     ' grabPx=' + (P.stoneR * RENDER.scale + Math.max(CONFIG.AIM.grabTolerancePx, CONFIG.AIM.grabToleranceRatio * P.stoneR * RENDER.scale)).toFixed(1));
-  // T26: the score lives in its own strip - never on top of the felt - and the field has
-  // really been shortened by that strip. Geometry + a pixel probe, not an eyeball.
-  {
-    const hb = RENDER.hudBox(), fieldTop = RENDER.Y(P.halfH);
-    const fieldH = 2 * P.halfH * RENDER.scale;
-    const at = (sx, sy) => {
-      const g = RENDER.canvas.getContext('2d').getImageData(Math.round(sx * RENDER.dpr), Math.round(sy * RENDER.dpr), 1, 1).data;
-      return [g[0], g[1], g[2]];
-    };
-    const strip = at(hb.left - 40, hb.mid);           // in the band, beside the pill
-    const pill = at(hb.left + 10, hb.bottom - 6);     // pill fill, clear of digits and dots
-    const felt = at(RENDER.cx, fieldTop + 6);         // just inside the top of the field
-    const inBand = hb.bottom <= RENDER.bandTop + RENDER.band + 0.5 && hb.top >= RENDER.bandTop - 0.5;
-    const noOverlap = hb.bottom <= fieldTop + 0.5;
-    const shortened = fieldH <= RENDER.H - 2 * RENDER.bandTop + 1;
-    const painted = pill[0] < strip[0] - 2 && pill[1] < strip[1] - 2 && pill[2] < strip[2] - 2;
-    const feltIsNotStrip = Math.abs(felt[1] - strip[1]) > 6;
-    T('T26 hudClearOfField', inBand && noOverlap && shortened && painted && feltIsNotStrip,
-      'band=' + RENDER.band + 'px hud[' + hb.top.toFixed(0) + '..' + hb.bottom.toFixed(0) +
-      '] fieldTop=' + fieldTop.toFixed(0) + ' fieldH=' + fieldH.toFixed(0) + '/' + RENDER.H +
-      'px stripPx=' + strip + ' pillPx=' + pill + ' feltTopPx=' + felt);
-  }
+  // T26: the score lives in its own strip - never on the felt - and the board has really been
+  // shortened by it. layoutProbe also runs against a portrait window in T27, so neither
+  // orientation can quietly reintroduce the overlap that playtest caught.
+  const sep = layoutProbe();
+  T('T26 hudClearOfField', sep.ok, 'layout=' + (RENDER.rot ? 'tall' : 'wide') + ' band=' + RENDER.band + 'px ' + sep.why);
   return out;
 }
 
@@ -1482,7 +1767,7 @@ function gameChecks() {
   // controls: cancel zone, slingshot direction, power scaling
   GAME.newMatch(); GAME.enter('Aiming');
   const t1 = GAME.turn, st = mine()[0];
-  const sx = RENDER.X(st.x), sy = RENDER.Y(st.y);
+  const sp0 = RENDER.pt(st.x, st.y), sx = sp0.x, sy = sp0.y;
   INPUT.onDown(PE(101, sx, sy)); INPUT.onMove(PE(101, sx + 8, sy));
   const a1 = INPUT.current(); INPUT.onUp(PE(101, sx + 8, sy));
   T('T16 cancelKeepsTurn', a1 && a1.cancelled && GAME.state === 'Aiming' && GAME.turn === t1 && st.vx === 0 && st.vy === 0,
@@ -1494,19 +1779,24 @@ function gameChecks() {
   const dragLo = Math.round(dead + 0.25 * (maxDrag - dead));
   const dragHi = Math.round(dead + 0.60 * (maxDrag - dead));
   INPUT.onDown(PE(102, sx, sy));
-  INPUT.onMove(PE(102, sx - dragLo, sy)); const lo = INPUT.current();
-  INPUT.onMove(PE(102, sx - dragHi, sy)); const a2 = INPUT.current();
+  /* "Pull left, shoot right" is a landscape sentence. Ask which way world +x points ON SCREEN
+     and pull the other way, so this test means the same thing in either layout. */
+  const ux = RENDER.dir(1, 0);
+  const pull = (dist) => ({ x: sx - ux.x * dist, y: sy - ux.y * dist });
+  const pLo = pull(dragLo), pHi = pull(dragHi);
+  INPUT.onMove(PE(102, pLo.x, pLo.y)); const lo = INPUT.current();
+  INPUT.onMove(PE(102, pHi.x, pHi.y)); const a2 = INPUT.current();
   const dirAway = a2 && a2.dir.x > 0.99 && Math.abs(a2.dir.y) < 0.01;  // pull left -> shot flies right
   // T20: the aim arrow is the only feedback a player gets, so it must actually be painted.
   // Sample along the arrow: its hue runs red->green with power, while the targeting halo under
   // the stone is blue - so a warm pixel at 1.5r means the arrow is really there.
   RENDER.frame(performance.now());
-  const gp = (wx, wy) => { const g = RENDER.canvas.getContext('2d').getImageData(Math.round(RENDER.X(wx) * RENDER.dpr), Math.round(RENDER.Y(wy) * RENDER.dpr), 1, 1).data; return [g[0], g[1], g[2]]; };
+  const gp = (wx, wy) => { const q = RENDER.pt(wx, wy); const g = RENDER.canvas.getContext('2d').getImageData(Math.round(q.x * RENDER.dpr), Math.round(q.y * RENDER.dpr), 1, 1).data; return [g[0], g[1], g[2]]; };
   // the arrow points where the shot will GO (away from the finger), i.e. +x for a leftward pull
   const apx = gp(st.x + 1.5 * P.stoneR, st.y);
   const arrowPainted = apx[0] > apx[2] + 60 && apx[1] > apx[2] + 40;
   T('T20 aimArrowPainted', arrowPainted, 'arrowPx=' + apx + ' power=' + (a2 && a2.power.toFixed(2)));
-  INPUT.onUp(PE(102, sx - dragHi, sy));
+  INPUT.onUp(PE(102, pHi.x, pHi.y));
   const launched = st.vx > 0 && GAME.state === 'Simulating' && GAME.turn === t1;
   const rising = lo && a2 && a2.power > lo.power && a2.power < 0.9;
   T('T17 slingshotOpposite', dirAway && rising && launched && a2.speed > 0,
@@ -1517,15 +1807,19 @@ function gameChecks() {
   // opponent stones inert; extra fingers cannot perturb an aim in progress
   GAME.enter('Aiming');
   const foe = GAME.sim.world.stones.find((s) => s.owner !== GAME.turn);
-  INPUT.onDown(PE(103, RENDER.X(foe.x), RENDER.Y(foe.y)));
+  const fp = RENDER.pt(foe.x, foe.y);
+  INPUT.onDown(PE(103, fp.x, fp.y));
   const foeIgnored = INPUT.pointerId === null;
   const mine2 = mine()[0];
-  INPUT.onDown(PE(104, RENDER.X(mine2.x), RENDER.Y(mine2.y)));
-  INPUT.onMove(PE(104, RENDER.X(mine2.x) - 90, RENDER.Y(mine2.y)));
+  const mp = RENDER.pt(mine2.x, mine2.y);
+  INPUT.onDown(PE(104, mp.x, mp.y));
+  INPUT.onMove(PE(104, mp.x - 90, mp.y));
   const before = INPUT.current();
-  INPUT.onDown(PE(105, 40, 40)); INPUT.onMove(PE(105, 300, 300)); INPUT.onDown(PE(106, RENDER.X(mine2.x) + 200, RENDER.Y(mine2.y)));
+  INPUT.onDown(PE(105, 40, 40)); INPUT.onMove(PE(105, 300, 300));
+  const mp2 = RENDER.pt(mine2.x, mine2.y);
+  INPUT.onDown(PE(106, mp2.x + 200, mp2.y));
   const after = INPUT.current();
-  INPUT.onUp(PE(104, RENDER.X(mine2.x) - 90, RENDER.Y(mine2.y)));
+  INPUT.onUp(PE(104, mp.x - 90, mp.y));
   const unchanged = before && after && Math.abs(before.power - after.power) < 1e-12 && Math.abs(before.dir.x - after.dir.x) < 1e-12;
   T('T18 multitouchIgnored', foeIgnored && unchanged && GAME.state === 'Simulating',
     'foeGrabBlocked=' + foeIgnored + ' aimUnchanged=' + !!unchanged + ' state=' + GAME.state);
