@@ -1,0 +1,2 @@
+# Bypass GitHub's Jekyll build: this site is a single hand-written index.html,
+# not a Jekyll site. Skipping the build means the file we ship is the file served.
